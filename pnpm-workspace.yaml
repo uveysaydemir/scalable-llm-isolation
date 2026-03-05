@@ -1,0 +1,6 @@
+packages:
+  - "edge-node"
+  - "memory-layer"
+  - "simulator"
+  - "dashboard"
+  - "evaluation"

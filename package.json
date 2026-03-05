@@ -1,0 +1,19 @@
+{
+  "name": "privacy-aware-llm",
+  "private": true,
+  "packageManager": "pnpm@9.0.0",
+  "workspaces": [
+    "edge-node",
+    "memory-layer",
+    "simulator",
+    "dashboard",
+    "evaluation"
+  ],
+  "scripts": {
+    "dev:edge": "pnpm --filter edge-node dev",
+    "dev:memory": "pnpm --filter memory-layer dev",
+    "dev": "pnpm -r dev",
+    "build": "pnpm -r build",
+    "start": "pnpm -r start"
+  }
+}
