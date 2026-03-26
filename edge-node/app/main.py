@@ -6,8 +6,9 @@ from typing import List
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
-from app.config import MODEL_NAME, MEMORY_SEARCH_LIMIT
+from app.config import MODEL_NAME, MEMORY_SEARCH_LIMIT, LTM_CACHE_TTL_SECONDS
 from app.logging_utils import log_event
+from app.memory.cache import LTMCache
 from app.memory.mem0_service import Mem0Service
 from app.prompt_builder import build_prompt
 from app.schemas import GenerateRequest, GenerateResponse, MemoryAddRequest
@@ -21,9 +22,10 @@ if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
 memory_service = Mem0Service()
+ltm_cache = LTMCache(ttl_seconds=LTM_CACHE_TTL_SECONDS)
 
-
-def retrieve_memories(user_id: str, query: str, limit: int) -> List[str]:
+# Fetch long-term memory from the current edge node's Mem0 instance.
+def fetch_memories_from_mem0(user_id: str, query: str, limit: int) -> List[str]:
     raw = memory_service.search(
         user_id=user_id,
         query=query,
@@ -33,6 +35,20 @@ def retrieve_memories(user_id: str, query: str, limit: int) -> List[str]:
     results = raw.get("results", []) if isinstance(raw, dict) else []
     memories = [item["memory"] for item in results if item.get("memory")]
     return memories
+
+
+def retrieve_memories(user_id: str, query: str, limit: int) -> tuple[List[str], str]:
+    cached_memories = ltm_cache.get(user_id)
+    if cached_memories is not None:
+        return cached_memories, "cache"
+
+    memories = fetch_memories_from_mem0(
+        user_id=user_id,
+        query=query,
+        limit=limit,
+    )
+    ltm_cache.set(user_id, memories)
+    return memories, "mem0"
 
 
 # For persisting user input to the edge-local mem0 instance
@@ -51,6 +67,7 @@ def persist_memory_background(user_id: str, user_prompt: str, assistant_output: 
             {
                 "userId": user_id,
                 "storedMessages": 2,
+                "cacheInvalidated": True,
             },
         )
     except Exception as e:
@@ -62,13 +79,15 @@ def persist_memory_background(user_id: str, user_prompt: str, assistant_output: 
             },
         )
 
-#Endpoints
+
+# Endpoints
 @app.get("/health")
 def health():
     return {
         "ok": True,
         "service": "edge-node",
         "modelName": MODEL_NAME,
+        "ltmCache": ltm_cache.stats(),
     }
 
 
@@ -109,10 +128,29 @@ def debug_add_memory(req: MemoryAddRequest):
             ],
         )
 
+        # Keep cache coherent with newly written memory.
+        ltm_cache.invalidate(req.userId)
+
         return {
             "ok": True,
             "userId": req.userId,
             "message": "Memory stored successfully",
+            "cacheInvalidated": True,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/memory/cache/invalidate")
+def debug_invalidate_cache(payload: dict):
+    try:
+        user_id = payload["userId"]
+        ltm_cache.invalidate(user_id)
+
+        return {
+            "ok": True,
+            "userId": user_id,
+            "message": "Cache invalidated",
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -124,7 +162,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
     started = time.perf_counter()
 
     try:
-        memories = retrieve_memories(
+        memories, memory_source = retrieve_memories(
             user_id=req.userId,
             query=req.prompt,
             limit=MEMORY_SEARCH_LIMIT,
@@ -150,8 +188,8 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             "temperature": 0.7,
             "pad_token_id": tokenizer.eos_token_id,
         }
-        
-        #Creating a thread and will listen the streamer in the main thread to get the ttft.
+
+        # Creating a thread and will listen the streamer in the main thread to get the ttft.
         thread = Thread(target=model.generate, kwargs=generation_kwargs)
         thread.start()
 
@@ -189,6 +227,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 "model": MODEL_NAME,
                 "promptChars": len(req.prompt),
                 "memoryCount": len(memories),
+                "memorySource": memory_source,
                 "ttftMs": ttft_ms,
                 "totalMs": total_ms,
                 "status": "success",
@@ -204,6 +243,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 "totalMs": total_ms,
                 "modelName": MODEL_NAME,
                 "memoryCount": len(memories),
+                "memorySource": memory_source,
             },
         )
 
