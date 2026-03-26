@@ -1,15 +1,17 @@
+#Logger for edge-node
+    
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
-#Logger for edge-node
 logger = logging.getLogger("edge-node")
 logging.basicConfig(level=logging.INFO)
 
-def log_event(event: str, payload: dict):
+
+def log_event(event: str, payload: dict) -> None:
     data = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "event": event,
-        **payload
+        **payload,
     }
     logger.info(json.dumps(data))
