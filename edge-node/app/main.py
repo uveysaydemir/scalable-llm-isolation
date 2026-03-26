@@ -35,6 +35,7 @@ def retrieve_memories(user_id: str, query: str, limit: int) -> List[str]:
     return memories
 
 
+# For persisting user input to the edge-local mem0 instance
 def persist_memory_background(user_id: str, user_prompt: str, assistant_output: str) -> None:
     try:
         memory_service.add_messages(
