@@ -1,6 +1,11 @@
-fastapi
-uvicorn[standard]
-transformers
-torch
-accelerate
-pydantic
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+transformers==4.41.0
+torch>=2.1.0
+accelerate==0.30.0
+pydantic==2.9.0
+
+# For memory layer of edge nodes
+mem0ai==0.1.88
+qdrant-client
+ollama==0.4.7

@@ -14,7 +14,7 @@ Key ideas:
 ## Repository Structure
 
 - `edge-node/` Edge inference service (API + session cache + memory retrieval integration)
-- `memory-layer/` Memory middleware service (Mem0 integration layer; placeholder in scaffolding)
+- `memory-layer/` Global memory kayer
 - `simulator/` Simulator harness (latency/mobility/failure injection; placeholder in scaffolding)
 - `dashboard/` Frontend visualization dashboard (placeholder in scaffolding)
 - `evaluation/` Benchmark scripts and metric collection (placeholder in scaffolding)
@@ -27,16 +27,10 @@ Prerequisites:
 - Node.js 18+ (recommended 20+)
 - npm
 
-Install:
+## Running the full stack
 
-- `npm install`
+Start everything with:
 
-Run services:
-
-- Edge node: `npm dev:edge`
-- Memory layer: `npm dev:memory`
-
-Health checks:
-
-- Edge node: `GET http://localhost:8080/health`
-- Memory layer: `GET http://localhost:8090/health`
+```bash
+docker compose up --build
+```
