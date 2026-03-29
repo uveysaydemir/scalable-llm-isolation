@@ -1,20 +1,28 @@
-from typing import List
+from typing import List, Optional
 
-#A prompt builder for fetching user memories from mem0 instance
-def build_prompt(user_prompt: str, memories: List[str]) -> str:
-    if not memories:
+
+def build_prompt(
+    user_prompt: str,
+    memories: List[str],
+    history: Optional[List[dict]] = None,
+) -> str:
+    has_context = bool(memories) or bool(history)
+
+    if not has_context:
         return user_prompt
 
-    memory_block = "\n".join(f"- {m}" for m in memories)
+    parts = ["You are a helpful assistant.\n"]
 
-    return f"""
-You are a helpful assistant.
+    if memories:
+        memory_block = "\n".join(f"- {m}" for m in memories)
+        parts.append(f"Relevant long-term user memories:\n{memory_block}\n")
 
-Relevant long-term user memories:
-{memory_block}
+    if history:
+        conversation = "\n".join(
+            f"{msg['role'].capitalize()}: {msg['content']}" for msg in history
+        )
+        parts.append(f"Conversation history:\n{conversation}\n")
 
-User request:
-{user_prompt}
+    parts.append(f"User request:\n{user_prompt}\n\nAnswer:")
 
-Answer:
-""".strip()
+    return "\n".join(parts).strip()
