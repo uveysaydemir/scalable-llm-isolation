@@ -34,11 +34,11 @@ services:
       ollama pull ${OLLAMA_EMBED_MODEL}
       "
 
-  edge-node:
+  memory-layer:
     build:
-      context: ./edge-node
+      context: ./memory-layer
     ports:
-      - "8080:8080"
+      - "8090:8090"
     env_file:
       - .env
     depends_on:
@@ -48,6 +48,23 @@ services:
         condition: service_healthy
       ollama-init:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8090/health')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 90s
+
+  edge-node:
+    build:
+      context: ./edge-node
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    depends_on:
+      memory-layer:
+        condition: service_healthy
 
 volumes:
   qdrant_data:

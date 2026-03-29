@@ -59,9 +59,10 @@ class SessionMemory:
 class STMStore:
     """In-memory store for all active sessions on this edge node."""
 
-    def __init__(self) -> None:
+    def __init__(self, session_ttl_seconds: Optional[int] = None) -> None:
         self._sessions: Dict[str, SessionMemory] = {}
         self._lock = threading.Lock()
+        self.session_ttl_seconds = session_ttl_seconds
 
     # ------------------------------------------------------------------
     # Core operations
@@ -135,6 +136,23 @@ class STMStore:
 
             self._sessions[session_id] = session
             return session_id
+
+    # ------------------------------------------------------------------
+    # TTL expiry
+    # ------------------------------------------------------------------
+
+    def get_expired_sessions(self) -> List[dict]:
+        """Return expired sessions without removing them."""
+        if self.session_ttl_seconds is None:
+            return []
+
+        now = time.time()
+        with self._lock:
+            return [
+                session.export()
+                for session in self._sessions.values()
+                if now - session.last_active_at >= self.session_ttl_seconds
+            ]
 
     # ------------------------------------------------------------------
     # Observability

@@ -4,7 +4,7 @@ from typing import Optional
 
 class GenerateRequest(BaseModel):
     userId: str = Field(..., min_length=1)
-    sessionId: Optional[str] = None  # auto-generated per-request if omitted
+    sessionId: Optional[str] = None
     prompt: str = Field(..., min_length=1)
     maxNewTokens: Optional[int] = 64
 
