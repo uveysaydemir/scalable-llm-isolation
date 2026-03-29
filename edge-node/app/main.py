@@ -10,8 +10,9 @@ from app.config import MODEL_NAME, MEMORY_SEARCH_LIMIT, LTM_CACHE_TTL_SECONDS
 from app.logging_utils import log_event
 from app.memory.cache import LTMCache
 from app.memory.mem0_service import Mem0Service
+from app.memory.stm_store import STMStore
 from app.prompt_builder import build_prompt
-from app.schemas import GenerateRequest, GenerateResponse, MemoryAddRequest
+from app.schemas import GenerateRequest, GenerateResponse, MemoryAddRequest, SessionEndRequest
 
 app = FastAPI(title="Edge Node")
 
@@ -23,6 +24,7 @@ if tokenizer.pad_token is None:
 
 memory_service = Mem0Service()
 ltm_cache = LTMCache(ttl_seconds=LTM_CACHE_TTL_SECONDS)
+stm_store = STMStore()
 
 # Fetch long-term memory from the current edge node's Mem0 instance.
 def fetch_memories_from_mem0(user_id: str, query: str, limit: int) -> List[str]:
@@ -88,6 +90,7 @@ def health():
         "service": "edge-node",
         "modelName": MODEL_NAME,
         "ltmCache": ltm_cache.stats(),
+        "stm": stm_store.stats(),
     }
 
 
@@ -159,9 +162,17 @@ def debug_invalidate_cache(payload: dict):
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
     request_id = str(uuid.uuid4())
+    session_id = req.sessionId or str(uuid.uuid4())
     started = time.perf_counter()
 
     try:
+        try:
+            stm_store.get_or_create(session_id=session_id, user_id=req.userId)
+        except ValueError as e:
+            raise HTTPException(status_code=403, detail=str(e))
+
+        stm_history = stm_store.get_history(session_id)
+
         memories, memory_source = retrieve_memories(
             user_id=req.userId,
             query=req.prompt,
@@ -171,6 +182,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
         final_prompt = build_prompt(
             user_prompt=req.prompt,
             memories=memories,
+            history=stm_history,
         )
 
         inputs = tokenizer(final_prompt, return_tensors="pt")
@@ -212,6 +224,9 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
 
         total_ms = round((finished - started) * 1000, 2)
 
+        stm_store.append(session_id, "user", req.prompt)
+        stm_store.append(session_id, "assistant", output)
+
         background_tasks.add_task(
             persist_memory_background,
             req.userId,
@@ -224,10 +239,12 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             {
                 "requestId": request_id,
                 "userId": req.userId,
+                "sessionId": session_id,
                 "model": MODEL_NAME,
                 "promptChars": len(req.prompt),
                 "memoryCount": len(memories),
                 "memorySource": memory_source,
+                "stmTurns": len(stm_history),
                 "ttftMs": ttft_ms,
                 "totalMs": total_ms,
                 "status": "success",
@@ -237,6 +254,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
         return GenerateResponse(
             ok=True,
             userId=req.userId,
+            sessionId=session_id,
             output=output,
             metrics={
                 "ttftMs": ttft_ms,
@@ -244,9 +262,12 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 "modelName": MODEL_NAME,
                 "memoryCount": len(memories),
                 "memorySource": memory_source,
+                "stmTurns": len(stm_history),
             },
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         log_event(
             "generate_failed",
@@ -259,3 +280,17 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             },
         )
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/session/end")
+def end_session(req: SessionEndRequest):
+    session = stm_store.export_session(req.sessionId)
+    if session is not None and session["userId"] != req.userId:
+        raise HTTPException(status_code=403, detail="Session belongs to a different user")
+
+    cleared = stm_store.end_session(req.sessionId)
+    return {
+        "ok": True,
+        "sessionId": req.sessionId,
+        "cleared": cleared,
+    }
