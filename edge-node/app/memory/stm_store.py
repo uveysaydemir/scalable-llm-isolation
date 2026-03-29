@@ -141,23 +141,18 @@ class STMStore:
     # TTL expiry
     # ------------------------------------------------------------------
 
-    def pop_expired_sessions(self) -> List[dict]:
-        """Return and remove all sessions inactive longer than session_ttl_seconds."""
+    def get_expired_sessions(self) -> List[dict]:
+        """Return expired sessions without removing them."""
         if self.session_ttl_seconds is None:
             return []
 
         now = time.time()
-        expired: List[dict] = []
         with self._lock:
-            expired_ids = [
-                sid
-                for sid, session in self._sessions.items()
+            return [
+                session.export()
+                for session in self._sessions.values()
                 if now - session.last_active_at >= self.session_ttl_seconds
             ]
-            for sid in expired_ids:
-                session = self._sessions.pop(sid)
-                expired.append(session.export())
-        return expired
 
     # ------------------------------------------------------------------
     # Observability

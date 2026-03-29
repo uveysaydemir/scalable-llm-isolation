@@ -26,28 +26,29 @@ async def _flush_expired_stm_loop() -> None:
     while True:
         await asyncio.sleep(60)
         try:
-            expired = stm_store.pop_expired_sessions()
+            expired = stm_store.get_expired_sessions()
             for session_data in expired:
+                session_id: str = session_data["sessionId"]
                 user_id: str = session_data["userId"]
                 messages: list = session_data["messages"]
-                if not messages:
-                    continue
                 try:
-                    await memory_client.add_messages(
-                        user_id=user_id,
-                        messages=[
-                            {"role": m["role"], "content": m["content"]}
-                            for m in messages
-                        ],
-                    )
+                    if messages:
+                        await memory_client.add_messages(
+                            user_id=user_id,
+                            messages=[
+                                {"role": m["role"], "content": m["content"]}
+                                for m in messages
+                            ],
+                        )
+                    stm_store.end_session(session_id)
                     log_event(
                         "stm_flushed_to_memory",
-                        {"userId": user_id, "messageCount": len(messages)},
+                        {"userId": user_id, "sessionId": session_id, "messageCount": len(messages)},
                     )
                 except Exception as e:
                     log_event(
                         "stm_flush_failed",
-                        {"userId": user_id, "error": str(e)},
+                        {"userId": user_id, "sessionId": session_id, "error": str(e)},
                     )
         except Exception as e:
             log_event("stm_flush_loop_error", {"error": str(e)})
