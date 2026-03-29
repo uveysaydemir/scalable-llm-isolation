@@ -1,5 +1,5 @@
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from mem0 import Memory
 
@@ -62,7 +62,7 @@ class Mem0Service:
         user_id: str,
         query: str,
         limit: int = 5,
-        filters: Dict[str, Any] | None = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         return self.memory.search(
             query=query,
