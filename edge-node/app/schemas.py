@@ -1,10 +1,15 @@
+from datetime import datetime
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Union
+
+
+TimestampInput = Union[datetime, float, int, str]
 
 
 class GenerateRequest(BaseModel):
     userId: str = Field(..., min_length=1)
-    sessionId: Optional[str] = None
+    sessionId: Optional[str] = Field(default=None, min_length=1)
+    lastMessageTimestamp: Optional[TimestampInput] = None
     prompt: str = Field(..., min_length=1)
     maxNewTokens: Optional[int] = 64
 
@@ -23,6 +28,10 @@ class MemoryAddRequest(BaseModel):
     assistantMessage: str = Field(..., min_length=1)
 
 
+class HandoverDecisionRequest(BaseModel):
+    userId: str = Field(..., min_length=1)
+    sessionId: Optional[str] = Field(default=None, min_length=1)
+    lastMessageTimestamp: Optional[TimestampInput] = None
 class SessionEndRequest(BaseModel):
     userId: str = Field(..., min_length=1)
     sessionId: str = Field(..., min_length=1)

@@ -8,13 +8,33 @@ from typing import List
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
-from app.config import LTM_CACHE_TTL_SECONDS, MEMORY_SEARCH_LIMIT, MODEL_NAME, STM_TTL_SECONDS
+from app.config import (
+    EDGE_NODE_ID,
+    HANDOVER_FRESHNESS_THRESHOLD_SECONDS,
+    MODEL_NAME,
+    MEMORY_SEARCH_LIMIT,
+    LTM_CACHE_TTL_SECONDS,
+    STM_TTL_SECONDS
+)
+from app.handover import (
+    HandoverDecision,
+    HandoverDetectionInput,
+    LocalSessionRegistry,
+    decide_handover,
+    parse_timestamp_seconds,
+)
 from app.logging_utils import log_event
 from app.memory.cache import LTMCache
 from app.memory.stm_store import STMStore
 from app.memory_client import MemoryClient
 from app.prompt_builder import build_prompt
-from app.schemas import GenerateRequest, GenerateResponse, MemoryAddRequest, SessionEndRequest
+from app.schemas import (
+    GenerateRequest,
+    GenerateResponse,
+    HandoverDecisionRequest,
+    MemoryAddRequest,
+    SessionEndRequest
+)
 
 memory_client = MemoryClient()
 ltm_cache = LTMCache(ttl_seconds=LTM_CACHE_TTL_SECONDS)
@@ -69,6 +89,45 @@ model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
+memory_service = Mem0Service()
+ltm_cache = LTMCache(ttl_seconds=LTM_CACHE_TTL_SECONDS)
+local_session_registry = LocalSessionRegistry(
+    ttl_seconds=HANDOVER_FRESHNESS_THRESHOLD_SECONDS
+)
+
+
+def classify_handover(
+    *,
+    user_id: str,
+    session_id: str | None,
+    last_message_timestamp: object,
+) -> HandoverDecision:
+    try:
+        last_message_timestamp_seconds = parse_timestamp_seconds(
+            last_message_timestamp
+        )
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    now = time.time()
+    has_local_session = local_session_registry.has_fresh_session(
+        user_id=user_id,
+        session_id=session_id,
+        now=now,
+    )
+
+    return decide_handover(
+        detection_input=HandoverDetectionInput(
+            user_id=user_id,
+            session_id=session_id,
+            last_message_timestamp=last_message_timestamp_seconds,
+            current_edge_id=EDGE_NODE_ID,
+        ),
+        has_local_session=has_local_session,
+        freshness_threshold_seconds=HANDOVER_FRESHNESS_THRESHOLD_SECONDS,
+        now=now,
+    )
+
 
 async def retrieve_memories(user_id: str, query: str, limit: int) -> tuple[List[str], str]:
     cached = ltm_cache.get(user_id)
@@ -107,8 +166,10 @@ def health():
     return {
         "ok": True,
         "service": "edge-node",
+        "edgeNodeId": EDGE_NODE_ID,
         "modelName": MODEL_NAME,
         "ltmCache": ltm_cache.stats(),
+        "localSessionRegistry": local_session_registry.stats(),
         "stm": stm_store.stats(),
     }
 
@@ -162,6 +223,33 @@ def debug_invalidate_cache(payload: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/handover/decision")
+def debug_handover_decision(req: HandoverDecisionRequest):
+    try:
+        decision = classify_handover(
+            user_id=req.userId,
+            session_id=req.sessionId,
+            last_message_timestamp=req.lastMessageTimestamp,
+        )
+
+        log_event(
+            "handover_decision",
+            {
+                "requestPath": "/handover/decision",
+                **decision.to_dict(),
+            },
+        )
+
+        return {
+            "ok": True,
+            "decision": decision.to_dict(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
     request_id = str(uuid.uuid4())
@@ -169,6 +257,27 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
     started = time.perf_counter()
 
     try:
+        handover_decision = classify_handover(
+            user_id=req.userId,
+            session_id=req.sessionId,
+            last_message_timestamp=req.lastMessageTimestamp,
+        )
+
+        log_event(
+            "handover_decision",
+            {
+                "requestId": request_id,
+                "requestPath": "/generate",
+                **handover_decision.to_dict(),
+            },
+        )
+
+        local_session_registry.touch(
+            user_id=req.userId,
+            session_id=req.sessionId,
+            edge_id=EDGE_NODE_ID,
+        )
+
         try:
             stm_store.get_or_create(session_id=session_id, user_id=req.userId)
         except ValueError as e:
@@ -241,6 +350,9 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             {
                 "requestId": request_id,
                 "userId": req.userId,
+                "sessionId": req.sessionId,
+                "edgeNodeId": EDGE_NODE_ID,
+                "handoverMode": handover_decision.mode,
                 "sessionId": session_id,
                 "model": MODEL_NAME,
                 "promptChars": len(req.prompt),
@@ -264,6 +376,9 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 "modelName": MODEL_NAME,
                 "memoryCount": len(memories),
                 "memorySource": memory_source,
+                "edgeNodeId": EDGE_NODE_ID,
+                "sessionId": req.sessionId,
+                "handover": handover_decision.to_dict(),
                 "stmTurns": len(stm_history),
             },
         )
@@ -276,6 +391,8 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             {
                 "requestId": request_id,
                 "userId": req.userId,
+                "sessionId": req.sessionId,
+                "edgeNodeId": EDGE_NODE_ID,
                 "model": MODEL_NAME,
                 "status": "error",
                 "error": str(e),
