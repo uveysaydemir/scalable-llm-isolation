@@ -41,6 +41,12 @@ services:
       - "8080:8080"
     env_file:
       - .env
+    environment:
+      EDGE_NODE_ID: ${EDGE_NODE_ID:-edge-node-1}
+      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-120}
+    volumes:
+      - ./edge-node/app:/app/app:ro
+      - ./edge-node/tests:/app/tests:ro
     depends_on:
       qdrant:
         condition: service_started
@@ -48,6 +54,14 @@ services:
         condition: service_healthy
       ollama-init:
         condition: service_completed_successfully
+
+  handover-tests:
+    build:
+      context: ./edge-node
+      dockerfile: Dockerfile.handover-test
+    profiles:
+      - test
+    command: ["python", "-m", "unittest", "discover", "-s", "tests"]
 
 volumes:
   qdrant_data:
