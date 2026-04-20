@@ -6,9 +6,6 @@ MODEL_NAME = os.getenv("MODEL_NAME", "distilgpt2")
 
 # Memory-related envs
 MEMORY_SEARCH_LIMIT = int(os.getenv("MEMORY_SEARCH_LIMIT", "5"))
-QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")
-QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
-QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "edge_memory")
 LTM_CACHE_TTL_SECONDS = int(os.getenv("LTM_CACHE_TTL_SECONDS", "300"))
 SESSION_TTL_SECONDS = int(
     os.getenv(

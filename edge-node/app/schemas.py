@@ -17,6 +17,7 @@ class GenerateRequest(BaseModel):
 class GenerateResponse(BaseModel):
     ok: bool
     userId: str
+    sessionId: str
     output: str
     metrics: dict
 
@@ -31,3 +32,6 @@ class HandoverDecisionRequest(BaseModel):
     userId: str = Field(..., min_length=1)
     sessionId: Optional[str] = Field(default=None, min_length=1)
     lastMessageTimestamp: Optional[TimestampInput] = None
+class SessionEndRequest(BaseModel):
+    userId: str = Field(..., min_length=1)
+    sessionId: str = Field(..., min_length=1)

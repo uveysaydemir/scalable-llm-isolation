@@ -44,8 +44,6 @@ class Mem0Service:
         }
         self.memory = self._init_with_retry()
 
-
-    # A function to retry mem0 instace initialization in case of any service memor depends on ,like ollama, is not available yet
     def _init_with_retry(self) -> Memory:
         last_error = None
         for _ in range(20):
