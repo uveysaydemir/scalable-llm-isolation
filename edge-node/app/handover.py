@@ -1,10 +1,11 @@
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 
 RecoveryMode = Literal["neighbor_recovery", "global_recovery", "local_session"]
+MovementDirection = Literal["left", "right"]
 
 
 @dataclass(frozen=True)
@@ -137,6 +138,28 @@ def normalize_epoch_timestamp(value: float) -> float:
     if value > 10_000_000_000:
         return value / 1000
     return value
+
+
+def opposite_direction(direction: MovementDirection) -> MovementDirection:
+    return "left" if direction == "right" else "right"
+
+
+def estimate_neighbor_edge_id(
+    *,
+    current_edge_id: str,
+    direction: MovementDirection,
+    topology: List[str],
+) -> Optional[str]:
+    if current_edge_id not in topology:
+        return None
+
+    current_index = topology.index(current_edge_id)
+    target_index = current_index - 1 if direction == "left" else current_index + 1
+
+    if target_index < 0 or target_index >= len(topology):
+        return None
+
+    return topology[target_index]
 
 
 def decide_handover(

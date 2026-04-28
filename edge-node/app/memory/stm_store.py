@@ -43,6 +43,11 @@ class SessionMemory:
         self._messages.append(STMMessage(role=role, content=content))
         self.last_active_at = time.time()
 
+    def append_imported(self, role: str, content: str, timestamp: float) -> None:
+        self._messages.append(
+            STMMessage(role=role, content=content, timestamp=timestamp)
+        )
+
     def get_history(self) -> List[dict]:
         return [msg.to_dict() for msg in self._messages]
 
@@ -132,7 +137,11 @@ class STMStore:
             session.last_active_at = data.get("lastActiveAt", time.time())
 
             for msg in messages:
-                session.append(msg["role"], msg["content"])
+                session.append_imported(
+                    msg["role"],
+                    msg["content"],
+                    msg.get("timestamp", session.last_active_at),
+                )
 
             self._sessions[session_id] = session
             return session_id
