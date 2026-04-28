@@ -3,37 +3,46 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from threading import Thread
-from typing import List
+from typing import List, Optional
 
+import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
 from app.config import (
     EDGE_NODE_ID,
+    EDGE_NEIGHBOR_LEFT_URL,
+    EDGE_NEIGHBOR_RIGHT_URL,
+    EDGE_TOPOLOGY,
     HANDOVER_FRESHNESS_THRESHOLD_SECONDS,
+    MIN_HANDOVER_PREFETCH_SPEED,
     MODEL_NAME,
     MEMORY_SEARCH_LIMIT,
     LTM_CACHE_TTL_SECONDS,
-    STM_TTL_SECONDS
+    STM_TTL_SECONDS,
 )
 from app.handover import (
     HandoverDecision,
     HandoverDetectionInput,
     LocalSessionRegistry,
     decide_handover,
+    estimate_neighbor_edge_id,
+    opposite_direction,
     parse_timestamp_seconds,
 )
 from app.logging_utils import log_event
 from app.memory.cache import LTMCache
 from app.memory.stm_store import STMStore
 from app.memory_client import MemoryClient
-from app.prompt_builder import build_prompt
+from app.prompt_builder import build_messages, build_prompt
 from app.schemas import (
     GenerateRequest,
     GenerateResponse,
     HandoverDecisionRequest,
+    HandoverExportRequest,
+    HandoverPackageRequest,
     MemoryAddRequest,
-    SessionEndRequest
+    SessionEndRequest,
 )
 
 memory_client = MemoryClient()
@@ -89,8 +98,6 @@ model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
-memory_service = Mem0Service()
-ltm_cache = LTMCache(ttl_seconds=LTM_CACHE_TTL_SECONDS)
 local_session_registry = LocalSessionRegistry(
     ttl_seconds=HANDOVER_FRESHNESS_THRESHOLD_SECONDS
 )
@@ -127,6 +134,181 @@ def classify_handover(
         freshness_threshold_seconds=HANDOVER_FRESHNESS_THRESHOLD_SECONDS,
         now=now,
     )
+
+
+def neighbor_url(direction: str) -> Optional[str]:
+    if direction == "left":
+        return EDGE_NEIGHBOR_LEFT_URL
+    if direction == "right":
+        return EDGE_NEIGHBOR_RIGHT_URL
+    return None
+
+
+def estimate_neighbor(direction: str | None) -> tuple[Optional[str], Optional[str]]:
+    if direction is None:
+        return None, None
+
+    target_edge_id = estimate_neighbor_edge_id(
+        current_edge_id=EDGE_NODE_ID,
+        direction=direction,
+        topology=EDGE_TOPOLOGY,
+    )
+    target_url = neighbor_url(direction)
+    return target_edge_id, target_url
+
+
+def build_handover_package(
+    *,
+    user_id: str,
+    session_id: str,
+    target_edge_id: str,
+    transfer_reason: str,
+    client_direction: str | None,
+    client_speed: float | None,
+    memories: List[str],
+) -> dict:
+    return {
+        "userId": user_id,
+        "sessionId": session_id,
+        "sourceEdgeId": EDGE_NODE_ID,
+        "targetEdgeId": target_edge_id,
+        "transferReason": transfer_reason,
+        "clientDirection": client_direction,
+        "clientSpeed": client_speed,
+        "stm": stm_store.export_session(session_id),
+        "ltm": memories,
+    }
+
+
+def import_handover_package(package: HandoverPackageRequest) -> dict:
+    if package.targetEdgeId != EDGE_NODE_ID:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Package target is {package.targetEdgeId}, not {EDGE_NODE_ID}",
+        )
+
+    if package.stm is not None:
+        stm_user_id = package.stm.get("userId")
+        stm_session_id = package.stm.get("sessionId")
+        if stm_user_id != package.userId or stm_session_id != package.sessionId:
+            raise HTTPException(
+                status_code=400,
+                detail="STM package userId/sessionId does not match handover package",
+            )
+        stm_store.import_session(package.stm)
+    else:
+        stm_store.get_or_create(
+            session_id=package.sessionId,
+            user_id=package.userId,
+        )
+
+    ltm_cache.set(package.userId, package.ltm)
+    local_session_registry.touch(
+        user_id=package.userId,
+        session_id=package.sessionId,
+        edge_id=EDGE_NODE_ID,
+    )
+
+    return {
+        "stmImported": package.stm is not None,
+        "ltmCount": len(package.ltm),
+    }
+
+
+async def send_handover_package(
+    *,
+    target_url: str,
+    package: dict,
+) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            res = await client.post(f"{target_url}/handover/package", json=package)
+            res.raise_for_status()
+
+        log_event(
+            "handover_package_sent",
+            {
+                "sourceEdgeId": EDGE_NODE_ID,
+                "targetEdgeId": package["targetEdgeId"],
+                "targetUrl": target_url,
+                "userId": package["userId"],
+                "sessionId": package["sessionId"],
+                "transferReason": package["transferReason"],
+                "stmIncluded": package["stm"] is not None,
+                "ltmCount": len(package["ltm"]),
+            },
+        )
+    except Exception as e:
+        log_event(
+            "handover_package_send_failed",
+            {
+                "sourceEdgeId": EDGE_NODE_ID,
+                "targetEdgeId": package.get("targetEdgeId"),
+                "targetUrl": target_url,
+                "userId": package.get("userId"),
+                "sessionId": package.get("sessionId"),
+                "error": str(e),
+            },
+        )
+
+
+async def recover_from_neighbor(
+    *,
+    user_id: str,
+    session_id: str,
+    client_direction: str | None,
+) -> dict:
+    if client_direction is None:
+        return {"attempted": False, "reason": "no_client_direction"}
+
+    source_direction = opposite_direction(client_direction)
+    source_edge_id, source_url = estimate_neighbor(source_direction)
+    if source_edge_id is None or source_url is None:
+        return {
+            "attempted": False,
+            "reason": "source_neighbor_not_configured",
+            "sourceDirection": source_direction,
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            res = await client.post(
+                f"{source_url}/handover/export",
+                json={
+                    "userId": user_id,
+                    "sessionId": session_id,
+                    "targetEdgeId": EDGE_NODE_ID,
+                },
+            )
+
+        if res.status_code == 404:
+            return {
+                "attempted": True,
+                "recovered": False,
+                "sourceEdgeId": source_edge_id,
+                "sourceUrl": source_url,
+                "reason": "source_session_not_found",
+            }
+
+        res.raise_for_status()
+        package = HandoverPackageRequest(**res.json()["package"])
+        import_result = import_handover_package(package)
+
+        return {
+            "attempted": True,
+            "recovered": True,
+            "sourceEdgeId": source_edge_id,
+            "sourceUrl": source_url,
+            **import_result,
+        }
+    except Exception as e:
+        return {
+            "attempted": True,
+            "recovered": False,
+            "sourceEdgeId": source_edge_id,
+            "sourceUrl": source_url,
+            "error": str(e),
+        }
 
 
 async def retrieve_memories(user_id: str, query: str, limit: int) -> tuple[List[str], str]:
@@ -171,6 +353,12 @@ def health():
         "ltmCache": ltm_cache.stats(),
         "localSessionRegistry": local_session_registry.stats(),
         "stm": stm_store.stats(),
+        "handover": {
+            "topology": EDGE_TOPOLOGY,
+            "leftNeighborUrl": EDGE_NEIGHBOR_LEFT_URL,
+            "rightNeighborUrl": EDGE_NEIGHBOR_RIGHT_URL,
+            "minPrefetchSpeed": MIN_HANDOVER_PREFETCH_SPEED,
+        },
     }
 
 
@@ -250,6 +438,69 @@ def debug_handover_decision(req: HandoverDecisionRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/handover/package")
+def receive_handover_package(req: HandoverPackageRequest):
+    try:
+        import_result = import_handover_package(req)
+
+        log_event(
+            "handover_package_received",
+            {
+                "sourceEdgeId": req.sourceEdgeId,
+                "targetEdgeId": EDGE_NODE_ID,
+                "userId": req.userId,
+                "sessionId": req.sessionId,
+                "transferReason": req.transferReason,
+                **import_result,
+            },
+        )
+
+        return {
+            "ok": True,
+            "edgeNodeId": EDGE_NODE_ID,
+            **import_result,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/handover/export")
+def export_handover_package(req: HandoverExportRequest):
+    session = stm_store.export_session(req.sessionId)
+    if session is None or session["userId"] != req.userId:
+        raise HTTPException(status_code=404, detail="Session not found on this edge")
+
+    memories = ltm_cache.get(req.userId) or []
+    package = build_handover_package(
+        user_id=req.userId,
+        session_id=req.sessionId,
+        target_edge_id=req.targetEdgeId,
+        transfer_reason="reactive_neighbor_recovery",
+        client_direction=None,
+        client_speed=None,
+        memories=memories,
+    )
+
+    log_event(
+        "handover_package_exported",
+        {
+            "sourceEdgeId": EDGE_NODE_ID,
+            "targetEdgeId": req.targetEdgeId,
+            "userId": req.userId,
+            "sessionId": req.sessionId,
+            "stmIncluded": package["stm"] is not None,
+            "ltmCount": len(memories),
+        },
+    )
+
+    return {
+        "ok": True,
+        "package": package,
+    }
+
+
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
     request_id = str(uuid.uuid4())
@@ -272,16 +523,41 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             },
         )
 
-        local_session_registry.touch(
-            user_id=req.userId,
-            session_id=req.sessionId,
-            edge_id=EDGE_NODE_ID,
-        )
+        neighbor_recovery = {"attempted": False}
+        if handover_decision.mode == "neighbor_recovery" and req.sessionId:
+            neighbor_recovery = await recover_from_neighbor(
+                user_id=req.userId,
+                session_id=req.sessionId,
+                client_direction=req.clientDirection,
+            )
+            log_event(
+                "neighbor_recovery_completed",
+                {
+                    "requestId": request_id,
+                    "userId": req.userId,
+                    "sessionId": req.sessionId,
+                    "edgeNodeId": EDGE_NODE_ID,
+                    **neighbor_recovery,
+                },
+            )
+
+            if neighbor_recovery.get("recovered"):
+                handover_decision = classify_handover(
+                    user_id=req.userId,
+                    session_id=req.sessionId,
+                    last_message_timestamp=req.lastMessageTimestamp,
+                )
 
         try:
             stm_store.get_or_create(session_id=session_id, user_id=req.userId)
         except ValueError as e:
             raise HTTPException(status_code=403, detail=str(e))
+
+        local_session_registry.touch(
+            user_id=req.userId,
+            session_id=session_id,
+            edge_id=EDGE_NODE_ID,
+        )
 
         stm_history = stm_store.get_history(session_id)
 
@@ -291,13 +567,26 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             limit=MEMORY_SEARCH_LIMIT,
         )
 
-        final_prompt = build_prompt(
+        messages = build_messages(
             user_prompt=req.prompt,
             memories=memories,
             history=stm_history,
         )
 
-        inputs = tokenizer(final_prompt, return_tensors="pt")
+        if getattr(tokenizer, "chat_template", None):
+            model_input = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            model_input = build_prompt(
+                user_prompt=req.prompt,
+                memories=memories,
+                history=stm_history,
+            )
+
+        inputs = tokenizer(model_input, return_tensors="pt")
         streamer = TextIteratorStreamer(
             tokenizer,
             skip_prompt=True,
@@ -309,7 +598,8 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             "streamer": streamer,
             "max_new_tokens": req.maxNewTokens or 64,
             "do_sample": True,
-            "temperature": 0.7,
+            "temperature": 0.2,
+            "top_p": 0.9,
             "pad_token_id": tokenizer.eos_token_id,
         }
 
@@ -338,6 +628,54 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
         stm_store.append(session_id, "user", req.prompt)
         stm_store.append(session_id, "assistant", output)
 
+        proactive_handover = {
+            "scheduled": False,
+            "reason": "no_client_direction",
+        }
+        if req.clientDirection is not None:
+            target_edge_id, target_url = estimate_neighbor(req.clientDirection)
+            speed = req.clientSpeed if req.clientSpeed is not None else 0
+
+            if speed <= MIN_HANDOVER_PREFETCH_SPEED:
+                proactive_handover = {
+                    "scheduled": False,
+                    "reason": "client_speed_below_threshold",
+                    "clientDirection": req.clientDirection,
+                    "clientSpeed": speed,
+                    "minPrefetchSpeed": MIN_HANDOVER_PREFETCH_SPEED,
+                }
+            elif target_edge_id is None or target_url is None:
+                proactive_handover = {
+                    "scheduled": False,
+                    "reason": "target_neighbor_not_configured",
+                    "clientDirection": req.clientDirection,
+                    "clientSpeed": speed,
+                }
+            else:
+                package = build_handover_package(
+                    user_id=req.userId,
+                    session_id=session_id,
+                    target_edge_id=target_edge_id,
+                    transfer_reason="predictive_client_mobility",
+                    client_direction=req.clientDirection,
+                    client_speed=speed,
+                    memories=memories,
+                )
+                background_tasks.add_task(
+                    send_handover_package,
+                    target_url=target_url,
+                    package=package,
+                )
+                proactive_handover = {
+                    "scheduled": True,
+                    "targetEdgeId": target_edge_id,
+                    "targetUrl": target_url,
+                    "clientDirection": req.clientDirection,
+                    "clientSpeed": speed,
+                    "stmIncluded": package["stm"] is not None,
+                    "ltmCount": len(memories),
+                }
+
         background_tasks.add_task(
             persist_memory_background,
             req.userId,
@@ -354,11 +692,15 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 "edgeNodeId": EDGE_NODE_ID,
                 "handoverMode": handover_decision.mode,
                 "sessionId": session_id,
+                "clientDirection": req.clientDirection,
+                "clientSpeed": req.clientSpeed,
                 "model": MODEL_NAME,
                 "promptChars": len(req.prompt),
                 "memoryCount": len(memories),
                 "memorySource": memory_source,
                 "stmTurns": len(stm_history),
+                "neighborRecovery": neighbor_recovery,
+                "proactiveHandover": proactive_handover,
                 "ttftMs": ttft_ms,
                 "totalMs": total_ms,
                 "status": "success",
@@ -377,8 +719,10 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 "memoryCount": len(memories),
                 "memorySource": memory_source,
                 "edgeNodeId": EDGE_NODE_ID,
-                "sessionId": req.sessionId,
+                "sessionId": session_id,
                 "handover": handover_decision.to_dict(),
+                "neighborRecovery": neighbor_recovery,
+                "proactiveHandover": proactive_handover,
                 "stmTurns": len(stm_history),
             },
         )

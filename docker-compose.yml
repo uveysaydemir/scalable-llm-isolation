@@ -35,18 +35,15 @@ services:
       "
 
   memory-layer:
+    image: scalable-llm-isolation-memory-layer
     build:
       context: ./memory-layer
     ports:
       - "8090:8090"
     env_file:
       - .env
-    environment:
-      EDGE_NODE_ID: ${EDGE_NODE_ID:-edge-node-1}
-      SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-120}
     volumes:
-      - ./edge-node/app:/app/app:ro
-      - ./edge-node/tests:/app/tests:ro
+      - ./memory-layer/app:/service/app:ro
     depends_on:
       qdrant:
         condition: service_started
@@ -61,13 +58,42 @@ services:
       retries: 30
       start_period: 90s
 
-  edge-node:
+  edge-node-left:
+    image: scalable-llm-isolation-edge-node
     build:
       context: ./edge-node
     ports:
       - "8080:8080"
     env_file:
       - .env
+    environment:
+      EDGE_NODE_ID: edge-node-left
+      EDGE_TOPOLOGY: edge-node-left,edge-node-right
+      EDGE_NEIGHBOR_RIGHT_URL: http://edge-node-right:8080
+      MEMORY_LAYER_URL: http://memory-layer:8090
+    volumes:
+      - ./edge-node/app:/app/app:ro
+      - ./edge-node/tests:/app/tests:ro
+    depends_on:
+      memory-layer:
+        condition: service_healthy
+
+  edge-node-right:
+    image: scalable-llm-isolation-edge-node
+    build:
+      context: ./edge-node
+    ports:
+      - "8083:8080"
+    env_file:
+      - .env
+    environment:
+      EDGE_NODE_ID: edge-node-right
+      EDGE_TOPOLOGY: edge-node-left,edge-node-right
+      EDGE_NEIGHBOR_LEFT_URL: http://edge-node-left:8080
+      MEMORY_LAYER_URL: http://memory-layer:8090
+    volumes:
+      - ./edge-node/app:/app/app:ro
+      - ./edge-node/tests:/app/tests:ro
     depends_on:
       memory-layer:
         condition: service_healthy

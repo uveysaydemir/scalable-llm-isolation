@@ -9,6 +9,8 @@ from app.handover import (  # noqa: E402
     HandoverDetectionInput,
     LocalSessionRegistry,
     decide_handover,
+    estimate_neighbor_edge_id,
+    opposite_direction,
     parse_timestamp_seconds,
 )
 
@@ -93,6 +95,41 @@ class HandoverDecisionTests(unittest.TestCase):
 
     def test_timestamp_parser_supports_browser_epoch_milliseconds(self) -> None:
         self.assertEqual(parse_timestamp_seconds(1_700_000_000_000), 1_700_000_000)
+
+    def test_estimates_linear_neighbors(self) -> None:
+        topology = ["edge-node-left", "edge-node-right"]
+
+        self.assertEqual(
+            estimate_neighbor_edge_id(
+                current_edge_id="edge-node-left",
+                direction="right",
+                topology=topology,
+            ),
+            "edge-node-right",
+        )
+        self.assertEqual(
+            estimate_neighbor_edge_id(
+                current_edge_id="edge-node-right",
+                direction="left",
+                topology=topology,
+            ),
+            "edge-node-left",
+        )
+
+    def test_edge_boundary_has_no_neighbor(self) -> None:
+        topology = ["edge-node-left", "edge-node-right"]
+
+        self.assertIsNone(
+            estimate_neighbor_edge_id(
+                current_edge_id="edge-node-left",
+                direction="left",
+                topology=topology,
+            )
+        )
+
+    def test_reactive_source_direction_is_opposite_client_direction(self) -> None:
+        self.assertEqual(opposite_direction("right"), "left")
+        self.assertEqual(opposite_direction("left"), "right")
 
 
 if __name__ == "__main__":
