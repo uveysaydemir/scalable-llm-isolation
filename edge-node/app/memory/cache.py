@@ -35,6 +35,19 @@ class LTMCache:
             expires_at=now + self.ttl_seconds,
         )
 
+    def touch(self, user_id: str) -> bool:
+        entry = self._store.get(user_id)
+        if entry is None:
+            return False
+
+        now = time.time()
+        if now >= entry.expires_at:
+            self._store.pop(user_id, None)
+            return False
+
+        entry.expires_at = now + self.ttl_seconds
+        return True
+
     def invalidate(self, user_id: str) -> None:
         self._store.pop(user_id, None)
 
