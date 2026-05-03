@@ -54,17 +54,22 @@ class STMStoreTests(unittest.TestCase):
             [("user", "first"), ("assistant", "second")],
         )
 
-    def test_expired_sessions_are_reported_without_removing_them(self) -> None:
+    def test_expired_sessions_are_reported_until_pruned_by_access(self) -> None:
         store = STMStore(session_ttl_seconds=0)
         store.get_or_create(session_id="s1", user_id="u1")
-        store.append("s1", "user", "expired immediately")
 
         expired = store.get_expired_sessions()
 
         self.assertEqual(len(expired), 1)
         self.assertEqual(expired[0]["sessionId"], "s1")
         self.assertEqual(expired[0]["userId"], "u1")
-        self.assertIsNotNone(store.export_session("s1"))
+        self.assertIsNone(store.export_session("s1"))
+
+    def test_stats_prunes_expired_sessions(self) -> None:
+        store = STMStore(session_ttl_seconds=0)
+        store.get_or_create(session_id="s1", user_id="u1")
+
+        self.assertEqual(store.stats()["activeSessions"], 0)
 
     def test_end_session_removes_only_existing_session(self) -> None:
         store = STMStore()

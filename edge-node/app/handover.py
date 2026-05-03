@@ -94,6 +94,15 @@ class LocalSessionRegistry:
         )
 
     def stats(self) -> dict:
+        now_seconds = time.time()
+        expired_keys = [
+            key
+            for key, record in self._sessions.items()
+            if now_seconds - record.last_seen_at > self.ttl_seconds
+        ]
+        for key in expired_keys:
+            self._sessions.pop(key, None)
+
         return {
             "ttlSeconds": self.ttl_seconds,
             "entryCount": len(self._sessions),

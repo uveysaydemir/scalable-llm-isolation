@@ -54,7 +54,18 @@ class LTMCache:
     def clear(self) -> None:
         self._store.clear()
 
+    def _prune_expired(self) -> None:
+        now = time.time()
+        expired_user_ids = [
+            user_id
+            for user_id, entry in self._store.items()
+            if now >= entry.expires_at
+        ]
+        for user_id in expired_user_ids:
+            self._store.pop(user_id, None)
+
     def stats(self) -> dict:
+        self._prune_expired()
         return {
             "ttlSeconds": self.ttl_seconds,
             "entryCount": len(self._store),

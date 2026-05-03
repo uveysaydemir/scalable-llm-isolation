@@ -76,6 +76,15 @@ class LTMCacheTests(unittest.TestCase):
         self.assertIsNone(cache.get("u1"))
         self.assertIsNone(cache.get("u2"))
 
+    def test_stats_prunes_expired_entries(self) -> None:
+        cache = LTMCache(ttl_seconds=60)
+
+        with patch("app.memory.cache.time.time", return_value=1000):
+            cache.set("u1", ["memory"])
+
+        with patch("app.memory.cache.time.time", return_value=1060):
+            self.assertEqual(cache.stats()["entryCount"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
