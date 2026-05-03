@@ -30,6 +30,15 @@ from app.handover import (
     opposite_direction,
     parse_timestamp_seconds,
 )
+from app.handover_package import (
+    build_handover_package as build_handover_package_payload,
+)
+from app.handover_package import (
+    export_handover_package as export_handover_package_payload,
+)
+from app.handover_package import (
+    import_handover_package as import_handover_package_payload,
+)
 from app.logging_utils import log_event
 from app.memory.cache import LTMCache
 from app.memory.stm_store import STMStore
@@ -103,6 +112,11 @@ local_session_registry = LocalSessionRegistry(
 )
 
 
+def elapsed_ms(start: float, end: float | None = None) -> float:
+    finish = end if end is not None else time.perf_counter()
+    return round((finish - start) * 1000, 2)
+
+
 def classify_handover(
     *,
     user_id: str,
@@ -167,52 +181,27 @@ def build_handover_package(
     client_speed: float | None,
     memories: List[str],
 ) -> dict:
-    return {
-        "userId": user_id,
-        "sessionId": session_id,
-        "sourceEdgeId": EDGE_NODE_ID,
-        "targetEdgeId": target_edge_id,
-        "transferReason": transfer_reason,
-        "clientDirection": client_direction,
-        "clientSpeed": client_speed,
-        "stm": stm_store.export_session(session_id),
-        "ltm": memories,
-    }
+    return build_handover_package_payload(
+        edge_node_id=EDGE_NODE_ID,
+        stm_store=stm_store,
+        user_id=user_id,
+        session_id=session_id,
+        target_edge_id=target_edge_id,
+        transfer_reason=transfer_reason,
+        client_direction=client_direction,
+        client_speed=client_speed,
+        memories=memories,
+    )
 
 
 def import_handover_package(package: HandoverPackageRequest) -> dict:
-    if package.targetEdgeId != EDGE_NODE_ID:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Package target is {package.targetEdgeId}, not {EDGE_NODE_ID}",
-        )
-
-    if package.stm is not None:
-        stm_user_id = package.stm.get("userId")
-        stm_session_id = package.stm.get("sessionId")
-        if stm_user_id != package.userId or stm_session_id != package.sessionId:
-            raise HTTPException(
-                status_code=400,
-                detail="STM package userId/sessionId does not match handover package",
-            )
-        stm_store.import_session(package.stm)
-    else:
-        stm_store.get_or_create(
-            session_id=package.sessionId,
-            user_id=package.userId,
-        )
-
-    ltm_cache.set(package.userId, package.ltm)
-    local_session_registry.touch(
-        user_id=package.userId,
-        session_id=package.sessionId,
-        edge_id=EDGE_NODE_ID,
+    return import_handover_package_payload(
+        edge_node_id=EDGE_NODE_ID,
+        stm_store=stm_store,
+        ltm_cache=ltm_cache,
+        local_session_registry=local_session_registry,
+        package=package,
     )
-
-    return {
-        "stmImported": package.stm is not None,
-        "ltmCount": len(package.ltm),
-    }
 
 
 async def send_handover_package(
@@ -468,19 +457,11 @@ def receive_handover_package(req: HandoverPackageRequest):
 
 @app.post("/handover/export")
 def export_handover_package(req: HandoverExportRequest):
-    session = stm_store.export_session(req.sessionId)
-    if session is None or session["userId"] != req.userId:
-        raise HTTPException(status_code=404, detail="Session not found on this edge")
-
-    memories = ltm_cache.get(req.userId) or []
-    package = build_handover_package(
-        user_id=req.userId,
-        session_id=req.sessionId,
-        target_edge_id=req.targetEdgeId,
-        transfer_reason="reactive_neighbor_recovery",
-        client_direction=None,
-        client_speed=None,
-        memories=memories,
+    package = export_handover_package_payload(
+        edge_node_id=EDGE_NODE_ID,
+        stm_store=stm_store,
+        ltm_cache=ltm_cache,
+        request=req,
     )
 
     log_event(
@@ -491,7 +472,7 @@ def export_handover_package(req: HandoverExportRequest):
             "userId": req.userId,
             "sessionId": req.sessionId,
             "stmIncluded": package["stm"] is not None,
-            "ltmCount": len(memories),
+            "ltmCount": len(package["ltm"]),
         },
     )
 
@@ -506,13 +487,16 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
     request_id = str(uuid.uuid4())
     session_id = req.sessionId or str(uuid.uuid4())
     started = time.perf_counter()
+    timings: dict[str, float | None] = {}
 
     try:
+        handover_decision_started = time.perf_counter()
         handover_decision = classify_handover(
             user_id=req.userId,
             session_id=req.sessionId,
             last_message_timestamp=req.lastMessageTimestamp,
         )
+        timings["handoverDecisionMs"] = elapsed_ms(handover_decision_started)
 
         log_event(
             "handover_decision",
@@ -524,12 +508,15 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
         )
 
         neighbor_recovery = {"attempted": False}
+        timings["neighborRecoveryMs"] = 0
         if handover_decision.mode == "neighbor_recovery" and req.sessionId:
+            neighbor_recovery_started = time.perf_counter()
             neighbor_recovery = await recover_from_neighbor(
                 user_id=req.userId,
                 session_id=req.sessionId,
                 client_direction=req.clientDirection,
             )
+            timings["neighborRecoveryMs"] = elapsed_ms(neighbor_recovery_started)
             log_event(
                 "neighbor_recovery_completed",
                 {
@@ -542,12 +529,17 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             )
 
             if neighbor_recovery.get("recovered"):
+                handover_reclassify_started = time.perf_counter()
                 handover_decision = classify_handover(
                     user_id=req.userId,
                     session_id=req.sessionId,
                     last_message_timestamp=req.lastMessageTimestamp,
                 )
+                timings["handoverReclassifyMs"] = elapsed_ms(
+                    handover_reclassify_started
+                )
 
+        stm_started = time.perf_counter()
         try:
             stm_store.get_or_create(session_id=session_id, user_id=req.userId)
         except ValueError as e:
@@ -558,15 +550,20 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             session_id=session_id,
             edge_id=EDGE_NODE_ID,
         )
+        ltm_cache.touch(req.userId)
 
         stm_history = stm_store.get_history(session_id)
+        timings["stmReadMs"] = elapsed_ms(stm_started)
 
+        memory_started = time.perf_counter()
         memories, memory_source = await retrieve_memories(
             user_id=req.userId,
             query=req.prompt,
             limit=MEMORY_SEARCH_LIMIT,
         )
+        timings["memoryRetrievalMs"] = elapsed_ms(memory_started)
 
+        prompt_started = time.perf_counter()
         messages = build_messages(
             user_prompt=req.prompt,
             memories=memories,
@@ -585,8 +582,11 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 memories=memories,
                 history=stm_history,
             )
+        timings["promptBuildMs"] = elapsed_ms(prompt_started)
 
+        tokenization_started = time.perf_counter()
         inputs = tokenizer(model_input, return_tensors="pt")
+        timings["tokenizationMs"] = elapsed_ms(tokenization_started)
         streamer = TextIteratorStreamer(
             tokenizer,
             skip_prompt=True,
@@ -603,6 +603,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             "pad_token_id": tokenizer.eos_token_id,
         }
 
+        inference_started = time.perf_counter()
         thread = Thread(target=model.generate, kwargs=generation_kwargs)
         thread.start()
 
@@ -616,14 +617,19 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
 
         thread.join()
 
-        finished = time.perf_counter()
+        inference_finished = time.perf_counter()
         output = "".join(chunks).strip()
+        timings["inferenceMs"] = elapsed_ms(inference_started, inference_finished)
 
         ttft_ms = None
         if first_token_time is not None:
             ttft_ms = round((first_token_time - started) * 1000, 2)
+            timings["inferenceTtftMs"] = elapsed_ms(
+                inference_started,
+                first_token_time,
+            )
 
-        total_ms = round((finished - started) * 1000, 2)
+        postprocess_started = time.perf_counter()
 
         stm_store.append(session_id, "user", req.prompt)
         stm_store.append(session_id, "assistant", output)
@@ -675,6 +681,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                     "stmIncluded": package["stm"] is not None,
                     "ltmCount": len(memories),
                 }
+        timings["postInferenceMs"] = elapsed_ms(postprocess_started)
 
         background_tasks.add_task(
             persist_memory_background,
@@ -682,6 +689,14 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             req.prompt,
             output,
         )
+
+        finished = time.perf_counter()
+        total_ms = elapsed_ms(started, finished)
+        inference_ms = timings.get("inferenceMs")
+        inference_excluded_ms = None
+        if isinstance(inference_ms, (int, float)):
+            inference_excluded_ms = round(total_ms - inference_ms, 2)
+        timings["inferenceExcludedMs"] = inference_excluded_ms
 
         log_event(
             "generate_completed",
@@ -703,6 +718,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 "proactiveHandover": proactive_handover,
                 "ttftMs": ttft_ms,
                 "totalMs": total_ms,
+                "timings": timings,
                 "status": "success",
             },
         )
@@ -715,6 +731,9 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             metrics={
                 "ttftMs": ttft_ms,
                 "totalMs": total_ms,
+                "inferenceMs": timings["inferenceMs"],
+                "inferenceExcludedMs": timings["inferenceExcludedMs"],
+                "timings": timings,
                 "modelName": MODEL_NAME,
                 "memoryCount": len(memories),
                 "memorySource": memory_source,
