@@ -1,6 +1,13 @@
 :root {
   color-scheme: light;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
   color: #242424;
   background: #ffffff;
 }
@@ -46,8 +53,25 @@ input {
   position: relative;
   width: min(43vw, 660px);
   min-width: 430px;
-  height: min(48vh, 462px);
+  height: min(52vh, 462px);
   min-height: 360px;
+}
+
+.globalMemory {
+  position: absolute;
+  left: 50%;
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  transform: translateX(-50%);
+  border-radius: 10px;
+  z-index: 3;
+}
+
+.globalMemory span {
+  color: #333;
+  font-size: 13px;
+  font-weight: 700;
 }
 
 .edgeHeader {
@@ -125,7 +149,7 @@ input {
 
 .edgeMetrics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
   margin-bottom: 18px;
 }
@@ -159,16 +183,46 @@ input {
 
 .userStateRow {
   display: grid;
-  grid-template-columns: minmax(96px, 1fr) 58px 66px 54px;
+  grid-template-columns: minmax(86px, 1fr) 64px 82px 82px;
   align-items: center;
   gap: 8px;
-  min-height: 38px;
+  min-height: 46px;
   border: 1px solid #ececec;
   border-radius: 8px;
   background: #ffffff;
   padding: 8px 10px;
   color: #505050;
   font-size: 12px;
+}
+
+.timerCell,
+.timerEmpty {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-width: 0;
+  color: #5f5f5f;
+  font-size: 11px;
+}
+
+.timerRing {
+  --progress: 0deg;
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 999px;
+  color: #1d4734;
+  font-size: 10px;
+  font-weight: 750;
+  background:
+    radial-gradient(circle at center, #ffffff 58%, transparent 60%),
+    conic-gradient(#64b98b var(--progress), #e7eee9 0deg);
+}
+
+.timerEmpty {
+  color: #9a9a9a;
 }
 
 .userStateName {
@@ -195,6 +249,25 @@ input {
   transform: translate(-50%, -50%);
   z-index: 4;
   pointer-events: none;
+}
+
+.transferArrow.dbToLeft,
+.transferArrow.leftToDb,
+.transferArrow.dbToRight,
+.transferArrow.rightToDb {
+  top: 18%;
+  width: 20vw;
+  min-width: 210px;
+}
+
+.transferArrow.dbToLeft,
+.transferArrow.leftToDb {
+  left: 37%;
+}
+
+.transferArrow.dbToRight,
+.transferArrow.rightToDb {
+  left: 63%;
 }
 
 .transferText {
@@ -234,14 +307,26 @@ input {
   transform: translateY(-50%) rotate(225deg);
 }
 
+.dbToLeft .transferHead,
+.rightToDb .transferHead {
+  left: 1px;
+  transform: translateY(-50%) rotate(225deg);
+}
+
+.leftToDb .transferHead,
+.dbToRight .transferHead {
+  right: 1px;
+  transform: translateY(-50%) rotate(45deg);
+}
+
 .userMarker {
   --user-color: #a6ffd0;
   position: absolute;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 94px;
-  height: 104px;
+  width: 78px;
+  height: 88px;
   transform: translate(-50%, -50%);
   transition: left 10s linear;
   pointer-events: auto;
@@ -254,8 +339,8 @@ input {
 
 .userButton {
   position: relative;
-  width: 86px;
-  height: 102px;
+  width: 72px;
+  height: 84px;
   border: 1px solid transparent;
   border-radius: 10px;
   background: transparent;
@@ -269,26 +354,26 @@ input {
 }
 
 .userButton img {
-  width: 76px;
-  height: 76px;
+  width: 62px;
+  height: 62px;
   object-fit: contain;
-  margin-top: 13px;
+  margin-top: 10px;
 }
 
 .userButton span {
   position: absolute;
   left: 50%;
-  bottom: 15px;
+  bottom: 13px;
   transform: translateX(-50%);
   color: var(--user-color);
-  font-size: 24px;
+  font-size: 21px;
   line-height: 1;
   font-weight: 700;
 }
 
 .moveButton {
   position: absolute;
-  top: 39px;
+  top: 30px;
   display: inline-grid;
   place-items: center;
   width: 28px;
@@ -301,11 +386,11 @@ input {
 }
 
 .leftMove {
-  left: -23px;
+  left: -25px;
 }
 
 .rightMove {
-  right: -23px;
+  right: -25px;
 }
 
 .messageBar {
@@ -353,6 +438,212 @@ input {
 .messageBar button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+.memoryTrigger {
+  position: fixed;
+  left: 28px;
+  bottom: 42px;
+  min-width: 142px;
+  height: 42px;
+  border: 1px solid #fff;
+  border-radius: 999px;
+  color: #222;
+  background: #f7fffb;
+  box-shadow: 0 2px 12px rgba(184, 184, 184, 0.16);
+  cursor: pointer;
+  z-index: 22;
+}
+
+.settingsTrigger {
+  position: fixed;
+  left: 28px;
+  bottom: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 132px;
+  height: 42px;
+  border: 1px solid #d8e0ef;
+  border-radius: 999px;
+  color: #25324a;
+  background: #ffffff;
+  box-shadow: 0 2px 12px rgba(184, 184, 184, 0.16);
+  cursor: pointer;
+  z-index: 22;
+}
+
+.memoryDialogBackdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.68);
+  backdrop-filter: blur(5px);
+  z-index: 40;
+}
+
+.memoryDialog {
+  width: min(920px, calc(100vw - 96px));
+  max-height: min(720px, calc(100vh - 120px));
+  border: 1px solid #dedede;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 18px 60px rgba(80, 80, 80, 0.18);
+  padding: 18px;
+  overflow: hidden;
+}
+
+.settingsDialog {
+  width: min(420px, calc(100vw - 96px));
+  border: 1px solid #dedede;
+  border-radius: 10px;
+  background: #ffffff;
+  box-shadow: 0 18px 60px rgba(80, 80, 80, 0.18);
+  padding: 18px;
+}
+
+.memoryDialogHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.memoryDialogHeader strong,
+.memoryDialogHeader span {
+  display: block;
+}
+
+.memoryDialogHeader strong {
+  color: #262626;
+  font-size: 16px;
+}
+
+.memoryDialogHeader span {
+  margin-top: 3px;
+  color: #777777;
+  font-size: 12px;
+}
+
+.memoryDialogHeader button {
+  height: 34px;
+  border: 1px solid #dedede;
+  border-radius: 999px;
+  background: #ffffff;
+  padding: 0 14px;
+  cursor: pointer;
+}
+
+.settingsField {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.settingsField span {
+  color: #555555;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.settingsField input {
+  width: 100%;
+  height: 42px;
+  border: 1px solid #dedede;
+  border-radius: 8px;
+  outline: none;
+  padding: 0 12px;
+  color: #222222;
+  background: #ffffff;
+}
+
+.settingsSubmit {
+  width: 100%;
+  height: 42px;
+  margin-top: 18px;
+  border: 1px solid #7eb59b;
+  border-radius: 999px;
+  color: #1f4d35;
+  background: #f7fffb;
+  cursor: pointer;
+}
+
+.settingsSubmit:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.memoryDialogGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  max-height: calc(min(720px, calc(100vh - 120px)) - 82px);
+  overflow: auto;
+}
+
+.memoryColumn {
+  border: 1px solid #eeeeee;
+  border-radius: 8px;
+  background: #fcfcfc;
+  padding: 14px;
+}
+
+.memoryColumn h3,
+.memoryColumn h4 {
+  margin: 0;
+}
+
+.memoryColumn h3 {
+  margin-bottom: 14px;
+  color: #2e2e2e;
+  font-size: 14px;
+}
+
+.memoryColumn h4 {
+  margin-bottom: 8px;
+  color: #686868;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.memoryColumn section + section {
+  margin-top: 16px;
+}
+
+.memoryList {
+  display: grid;
+  gap: 8px;
+}
+
+.memoryItem {
+  border: 1px solid #ececec;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 9px 10px;
+}
+
+.memoryItem span {
+  display: block;
+  margin-bottom: 4px;
+  color: #438164;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.memoryItem p,
+.emptyMemory {
+  margin: 0;
+  color: #3d3d3d;
+  font-size: 13px;
+  line-height: 1.42;
+}
+
+.emptyMemory {
+  color: #9a9a9a;
 }
 
 .spinIcon {

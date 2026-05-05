@@ -51,6 +51,7 @@ from app.schemas import (
     HandoverExportRequest,
     HandoverPackageRequest,
     MemoryAddRequest,
+    RuntimeSettingsRequest,
     SessionEndRequest,
 )
 
@@ -145,7 +146,7 @@ def classify_handover(
             current_edge_id=EDGE_NODE_ID,
         ),
         has_local_session=has_local_session,
-        freshness_threshold_seconds=HANDOVER_FRESHNESS_THRESHOLD_SECONDS,
+        freshness_threshold_seconds=local_session_registry.ttl_seconds,
         now=now,
     )
 
@@ -351,6 +352,41 @@ def health():
     }
 
 
+@app.get("/settings")
+def get_runtime_settings():
+    return {
+        "ok": True,
+        "edgeNodeId": EDGE_NODE_ID,
+        "sessionTtlSeconds": local_session_registry.ttl_seconds,
+        "stmTtlSeconds": stm_store.session_ttl_seconds,
+        "ltmCacheTtlSeconds": ltm_cache.ttl_seconds,
+    }
+
+
+@app.post("/settings")
+def update_runtime_settings(req: RuntimeSettingsRequest):
+    local_session_registry.ttl_seconds = req.sessionTtlSeconds
+    stm_store.session_ttl_seconds = req.sessionTtlSeconds
+    ltm_cache.update_ttl(req.ltmCacheTtlSeconds)
+
+    log_event(
+        "runtime_settings_updated",
+        {
+            "edgeNodeId": EDGE_NODE_ID,
+            "sessionTtlSeconds": req.sessionTtlSeconds,
+            "ltmCacheTtlSeconds": req.ltmCacheTtlSeconds,
+        },
+    )
+
+    return {
+        "ok": True,
+        "edgeNodeId": EDGE_NODE_ID,
+        "sessionTtlSeconds": local_session_registry.ttl_seconds,
+        "stmTtlSeconds": stm_store.session_ttl_seconds,
+        "ltmCacheTtlSeconds": ltm_cache.ttl_seconds,
+    }
+
+
 @app.post("/memory/search")
 async def debug_search_memory(payload: dict):
     try:
@@ -396,6 +432,36 @@ def debug_invalidate_cache(payload: dict):
         user_id = payload["userId"]
         ltm_cache.invalidate(user_id)
         return {"ok": True, "userId": user_id, "message": "Cache invalidated"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/debug/user-state")
+def debug_user_state(userId: str, sessionId: Optional[str] = None):
+    try:
+        stm = None
+        if sessionId:
+            exported = stm_store.export_session(sessionId)
+            if exported is not None and exported["userId"] == userId:
+                stm = exported
+
+        ltm = ltm_cache.snapshot(userId)
+
+        return {
+            "ok": True,
+            "edgeNodeId": EDGE_NODE_ID,
+            "userId": userId,
+            "sessionId": sessionId,
+            "stm": stm,
+            "ltm": ltm
+            or {
+                "present": False,
+                "memories": [],
+                "cachedAt": None,
+                "expiresAt": None,
+                "ttlSeconds": ltm_cache.ttl_seconds,
+            },
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

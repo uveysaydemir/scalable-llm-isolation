@@ -27,6 +27,24 @@ class LTMCache:
 
         return entry.memories
 
+    def snapshot(self, user_id: str) -> Optional[dict]:
+        entry = self._store.get(user_id)
+        if entry is None:
+            return None
+
+        now = time.time()
+        if now >= entry.expires_at:
+            self._store.pop(user_id, None)
+            return None
+
+        return {
+            "present": True,
+            "memories": entry.memories,
+            "cachedAt": entry.cached_at,
+            "expiresAt": entry.expires_at,
+            "ttlSeconds": self.ttl_seconds,
+        }
+
     def set(self, user_id: str, memories: List[str]) -> None:
         now = time.time()
         self._store[user_id] = LTMCacheEntry(
@@ -47,6 +65,13 @@ class LTMCache:
 
         entry.expires_at = now + self.ttl_seconds
         return True
+
+    def update_ttl(self, ttl_seconds: int) -> None:
+        self._prune_expired()
+        now = time.time()
+        self.ttl_seconds = ttl_seconds
+        for entry in self._store.values():
+            entry.expires_at = now + ttl_seconds
 
     def invalidate(self, user_id: str) -> None:
         self._store.pop(user_id, None)

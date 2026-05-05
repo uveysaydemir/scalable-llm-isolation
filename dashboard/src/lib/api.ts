@@ -68,11 +68,39 @@ export type HandoverExportResponse = {
     sourceEdgeId: string;
     targetEdgeId: string;
     stm: null | {
+      lastActiveAt?: number;
       messages?: Array<{ role: string; content: string }>;
       [key: string]: unknown;
     };
     ltm: string[];
   };
+};
+
+export type EdgeUserStateResponse = {
+  ok: boolean;
+  edgeNodeId: string;
+  userId: string;
+  sessionId: string | null;
+  stm: null | {
+    lastActiveAt?: number;
+    messages?: Array<{ role: string; content: string; timestamp?: number }>;
+    [key: string]: unknown;
+  };
+  ltm: {
+    present: boolean;
+    memories: string[];
+    cachedAt: number | null;
+    expiresAt: number | null;
+    ttlSeconds: number;
+  };
+};
+
+export type RuntimeSettingsResponse = {
+  ok: boolean;
+  edgeNodeId: string;
+  sessionTtlSeconds: number;
+  stmTtlSeconds: number;
+  ltmCacheTtlSeconds: number;
 };
 
 export type HandoverImportResponse = {
@@ -101,7 +129,41 @@ export async function fetchEdgeHealth(edge: EdgeKey): Promise<HealthResponse> {
   return fetchJson<HealthResponse>(`${edgeBasePath[edge]}/health`);
 }
 
-export async function generate(edge: EdgeKey, payload: GenerateRequest): Promise<GenerateResponse> {
+export async function fetchRuntimeSettings(
+  edge: EdgeKey,
+): Promise<RuntimeSettingsResponse> {
+  return fetchJson<RuntimeSettingsResponse>(`${edgeBasePath[edge]}/settings`);
+}
+
+export async function updateRuntimeSettings(
+  edge: EdgeKey,
+  payload: { sessionTtlSeconds: number; ltmCacheTtlSeconds: number },
+): Promise<RuntimeSettingsResponse> {
+  return fetchJson<RuntimeSettingsResponse>(`${edgeBasePath[edge]}/settings`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function fetchEdgeUserState(
+  edge: EdgeKey,
+  payload: { userId: string; sessionId?: string },
+): Promise<EdgeUserStateResponse> {
+  const params = new URLSearchParams({ userId: payload.userId });
+  if (payload.sessionId) {
+    params.set("sessionId", payload.sessionId);
+  }
+
+  return fetchJson<EdgeUserStateResponse>(
+    `${edgeBasePath[edge]}/debug/user-state?${params.toString()}`,
+  );
+}
+
+export async function generate(
+  edge: EdgeKey,
+  payload: GenerateRequest,
+): Promise<GenerateResponse> {
   return fetchJson<GenerateResponse>(`${edgeBasePath[edge]}/generate`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -113,22 +175,28 @@ export async function exportHandoverPackage(
   edge: EdgeKey,
   payload: { userId: string; sessionId: string; targetEdgeId: string },
 ): Promise<HandoverExportResponse> {
-  return fetchJson<HandoverExportResponse>(`${edgeBasePath[edge]}/handover/export`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  return fetchJson<HandoverExportResponse>(
+    `${edgeBasePath[edge]}/handover/export`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export async function importHandoverPackage(
   edge: EdgeKey,
   payload: HandoverExportResponse["package"],
 ): Promise<HandoverImportResponse> {
-  return fetchJson<HandoverImportResponse>(`${edgeBasePath[edge]}/handover/package`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
+  return fetchJson<HandoverImportResponse>(
+    `${edgeBasePath[edge]}/handover/package`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
