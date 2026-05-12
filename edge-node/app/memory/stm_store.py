@@ -78,20 +78,26 @@ class STMStore:
 
         Raises ``ValueError`` if the session already exists but belongs to a
         different ``user_id`` (cross-user leakage guard).
+
+        If the requested session exists but is expired, the expired entry is
+        left untouched (the flush loop will persist and remove it) and a brand-
+        new session with a fresh UUID is returned instead.
         """
         with self._lock:
             existing = self._sessions.get(session_id)
             if existing is not None:
-                if self._is_expired(existing):
-                    self._sessions.pop(session_id, None)
-                    existing = None
-
-            if existing is not None:
-                if existing.user_id != user_id:
-                    raise ValueError(
-                        f"Session {session_id} belongs to a different user"
-                    )
-                return existing
+                if not self._is_expired(existing):
+                    if existing.user_id != user_id:
+                        raise ValueError(
+                            f"Session {session_id} belongs to a different user"
+                        )
+                    return existing
+                # Expired: leave it for the flush loop, fall through to create a
+                # fresh session under a new id so we don't overwrite the old data.
+                new_id = str(uuid.uuid4())
+                session = SessionMemory(session_id=new_id, user_id=user_id)
+                self._sessions[new_id] = session
+                return session
 
             session = SessionMemory(session_id=session_id, user_id=user_id)
             self._sessions[session_id] = session
@@ -101,7 +107,6 @@ class STMStore:
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None or self._is_expired(session):
-                self._sessions.pop(session_id, None)
                 return
             session.append(role, content)
 
@@ -109,7 +114,6 @@ class STMStore:
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None or self._is_expired(session):
-                self._sessions.pop(session_id, None)
                 return []
             return session.get_history()
 
@@ -126,9 +130,23 @@ class STMStore:
         with self._lock:
             session = self._sessions.get(session_id)
             if session is None or self._is_expired(session):
-                self._sessions.pop(session_id, None)
+                # Do NOT pop expired sessions here — the flush loop owns their
+                # lifecycle and must persist them before removal.
                 return None
             return session.export()
+
+    def find_latest_by_user_id(self, user_id: str) -> Optional[dict]:
+        """Return the most-recently-active non-expired session for a user."""
+        with self._lock:
+            now = time.time()
+            candidates = [
+                s for s in self._sessions.values()
+                if s.user_id == user_id and not self._is_expired(s, now=now)
+            ]
+            if not candidates:
+                return None
+            best = max(candidates, key=lambda s: s.last_active_at)
+            return best.export()
 
     def import_session(self, data: dict) -> str:
         """Hydrate a session from a handover payload.
@@ -197,7 +215,12 @@ class STMStore:
 
     def stats(self) -> dict:
         with self._lock:
-            self._prune_expired_locked()
+            if self.session_ttl_seconds is None:
+                return {"activeSessions": len(self._sessions)}
+            now = time.time()
             return {
-                "activeSessions": len(self._sessions),
+                "activeSessions": sum(
+                    1 for s in self._sessions.values()
+                    if not self._is_expired(s, now=now)
+                )
             }

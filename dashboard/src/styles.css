@@ -182,27 +182,157 @@ input {
 }
 
 .userStateRow {
+  border: 1px solid #ececec;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #505050;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.userStateRow:hover {
+  border-color: #d4d4d4;
+  background: #fafafa;
+}
+
+.userStateRow--open {
+  border-color: #c8ddd3;
+  background: #fafafa;
+}
+
+.userStateRowInner {
   display: grid;
   grid-template-columns: minmax(86px, 1fr) 64px 82px 82px;
   align-items: center;
   gap: 8px;
   min-height: 46px;
-  border: 1px solid #ececec;
-  border-radius: 8px;
-  background: #ffffff;
   padding: 8px 10px;
-  color: #505050;
-  font-size: 12px;
 }
 
-.timerCell,
+.expandChevron {
+  margin-left: auto;
+  color: #aaa;
+  flex-shrink: 0;
+  transition: transform 0.18s ease;
+}
+
+.expandChevron--open {
+  transform: rotate(180deg);
+}
+
+.userStateExpanded {
+  padding: 0 10px 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.userStateExpSection {
+  display: grid;
+  gap: 5px;
+}
+
+.userStateExpLabel {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #999;
+}
+
+.userStateExpMessages {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.userStateExpMsg {
+  border-radius: 5px;
+  padding: 5px 8px;
+  font-size: 11px;
+}
+
+.userStateExpMsg--user {
+  background: #f0f5ff;
+}
+
+.userStateExpMsg--assistant {
+  background: #f4f4f4;
+}
+
+.userStateExpRole {
+  display: block;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #aaa;
+  margin-bottom: 2px;
+}
+
+.userStateExpMsg p {
+  margin: 0;
+  color: #222;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.userStateExpMems {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.userStateExpMemItem {
+  border: 1px solid #ececec;
+  border-radius: 5px;
+  padding: 5px 8px;
+  background: #fafafa;
+}
+
+.userStateExpMemItem p {
+  margin: 0;
+  font-size: 11px;
+  color: #333;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.userStateExpEmpty {
+  margin: 0;
+  font-size: 11px;
+  color: #bbb;
+  font-style: italic;
+}
+
+.timerCell {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  color: #5f5f5f;
+  font-size: 11px;
+}
+
+.timerCellTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.timerSize {
+  color: #777;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
 .timerEmpty {
   display: inline-flex;
   align-items: center;
-  justify-content: space-between;
   gap: 6px;
   min-width: 0;
-  color: #5f5f5f;
+  color: #9a9a9a;
   font-size: 11px;
 }
 
@@ -219,10 +349,6 @@ input {
   background:
     radial-gradient(circle at center, #ffffff 58%, transparent 60%),
     conic-gradient(#64b98b var(--progress), #e7eee9 0deg);
-}
-
-.timerEmpty {
-  color: #9a9a9a;
 }
 
 .userStateName {
@@ -440,16 +566,20 @@ input {
   opacity: 0.55;
 }
 
-.memoryTrigger {
+.memoryDetailsTrigger {
   position: fixed;
-  left: 28px;
+  right: 28px;
   bottom: 42px;
-  min-width: 142px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 116px;
   height: 42px;
-  border: 1px solid #fff;
+  border: 1px solid #d8e0ef;
   border-radius: 999px;
-  color: #222;
-  background: #f7fffb;
+  color: #25324a;
+  background: #ffffff;
   box-shadow: 0 2px 12px rgba(184, 184, 184, 0.16);
   cursor: pointer;
   z-index: 22;
@@ -683,4 +813,258 @@ input {
   .edgeNode {
     min-width: 400px;
   }
+}
+
+/* ─── Side sheet ─────────────────────────────── */
+
+.sideSheetBackdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.18);
+  z-index: 30;
+}
+
+.sideSheet {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(520px, calc(100vw - 48px));
+  height: 100vh;
+  background: #ffffff;
+  border-left: 1px solid #e0e0e0;
+  box-shadow: -6px 0 40px rgba(0, 0, 0, 0.1);
+  display: flex;
+  flex-direction: column;
+  z-index: 31;
+  overflow: hidden;
+}
+
+.sideSheetHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid #ebebeb;
+  flex-shrink: 0;
+}
+
+.sideSheetHeader strong {
+  display: block;
+  font-size: 15px;
+  color: #1a1a1a;
+}
+
+.sideSheetHeader span {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #999;
+  font-family: monospace;
+}
+
+.sideSheetHeader button {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border: 1px solid #e0e0e0;
+  border-radius: 999px;
+  background: #f7f7f7;
+  color: #555;
+  font-size: 13px;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.sideSheetBody {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* two-column edge grid */
+.sideSheetEdgeGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-bottom: 1px solid #ebebeb;
+}
+
+.sideSheetEdgeCol {
+  padding: 14px 16px;
+}
+
+.sideSheetEdgeCol + .sideSheetEdgeCol {
+  border-left: 1px solid #ebebeb;
+}
+
+.sideSheetEdgeTitle {
+  margin: 0 0 12px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #555;
+}
+
+.sideSheetSection {
+  margin-bottom: 14px;
+}
+
+.sideSheetSection:last-child {
+  margin-bottom: 0;
+}
+
+.sideSheetSectionHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+.sideSheetSectionHead > span:first-child {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #888;
+}
+
+.sideSheetSectionHead--global > span:first-child {
+  color: #444;
+  font-size: 12px;
+}
+
+.ssSize {
+  font-size: 10px;
+  font-weight: 700;
+  color: #2b6b4a;
+  background: #eaf3ef;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.ssSubtitle {
+  font-size: 10px;
+  color: #bbb;
+  font-weight: 400;
+}
+
+.sideSheetLocalHistory {
+  padding: 14px 18px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+/* STM chat */
+.ssChatHistory {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ssChatMsg {
+  border-radius: 7px;
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
+.ssChatMsg--user {
+  background: #f0f5ff;
+}
+
+.ssChatMsg--assistant {
+  background: #f4f4f4;
+}
+
+.ssChatRole {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #999;
+}
+
+.ssChatMsgMeta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+
+.ssChatEdge {
+  font-size: 9px;
+  color: #bbb;
+}
+
+.ssChatTime {
+  font-size: 9px;
+  color: #bbb;
+  margin-left: auto;
+}
+
+.ssChatMsg p {
+  margin: 0;
+  color: #222;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+/* LTM memory list */
+.ssMemList {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.ssMemItem {
+  border: 1px solid #ececec;
+  border-radius: 7px;
+  padding: 7px 10px;
+  background: #fafafa;
+}
+
+.ssMemItem p {
+  margin: 0;
+  font-size: 12px;
+  color: #333;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.ssMemMeta {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  color: #aaa;
+}
+
+/* empty + loading states */
+.ssEmpty {
+  margin: 0;
+  font-size: 12px;
+  color: #bbb;
+  font-style: italic;
+}
+
+.ssEmpty--loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ssEmpty--error {
+  color: #c0392b;
+  font-style: normal;
+}
+
+/* global LTM section */
+.sideSheetGlobal {
+  padding: 16px 18px;
+}
+
+.sideSheetGlobal .sideSheetSectionHead {
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #f0f0f0;
 }

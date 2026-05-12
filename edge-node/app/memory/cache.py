@@ -1,6 +1,8 @@
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+
+import numpy as np
 
 
 @dataclass
@@ -8,6 +10,7 @@ class LTMCacheEntry:
     memories: List[str]
     cached_at: float
     expires_at: float
+    embeddings: Optional[np.ndarray] = field(default=None, repr=False)
 
 
 class LTMCache:
@@ -45,13 +48,37 @@ class LTMCache:
             "ttlSeconds": self.ttl_seconds,
         }
 
-    def set(self, user_id: str, memories: List[str]) -> None:
+    def set(
+        self,
+        user_id: str,
+        memories: List[str],
+        embeddings: Optional[np.ndarray] = None,
+    ) -> None:
         now = time.time()
         self._store[user_id] = LTMCacheEntry(
             memories=memories,
             cached_at=now,
             expires_at=now + self.ttl_seconds,
+            embeddings=embeddings,
         )
+
+    def get_full(
+        self, user_id: str
+    ) -> Optional[tuple[List[str], np.ndarray]]:
+        """Return (memories, embeddings) or None if missing / expired."""
+        entry = self._store.get(user_id)
+        if entry is None:
+            return None
+        now = time.time()
+        if now >= entry.expires_at:
+            self._store.pop(user_id, None)
+            return None
+        embeddings = (
+            entry.embeddings
+            if entry.embeddings is not None
+            else np.empty((0, 384), dtype=np.float32)
+        )
+        return entry.memories, embeddings
 
     def touch(self, user_id: str) -> bool:
         entry = self._store.get(user_id)

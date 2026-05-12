@@ -199,6 +199,30 @@ export async function importHandoverPackage(
   );
 }
 
+export type GlobalMemoryEntry = {
+  id?: string;
+  memory: string;
+  score?: number;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export async function fetchGlobalMemories(
+  userId: string,
+): Promise<GlobalMemoryEntry[]> {
+  const res = await fetchJson<{
+    ok: boolean;
+    results: Array<Record<string, unknown>>;
+  }>(`/api/memory/memory/all?userId=${encodeURIComponent(userId)}`);
+  return (res.results ?? []).map((r) => ({
+    id: r.id as string | undefined,
+    memory: (r.memory as string) ?? "",
+    score: r.score as number | undefined,
+    created_at: r.created_at as string | undefined,
+    updated_at: r.updated_at as string | undefined,
+  }));
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   const text = await res.text();

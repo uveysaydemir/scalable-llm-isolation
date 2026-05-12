@@ -40,6 +40,7 @@ from app.handover_package import (
     import_handover_package as import_handover_package_payload,
 )
 from app.logging_utils import log_event
+from app.memory import local_search
 from app.memory.cache import LTMCache
 from app.memory.stm_store import STMStore
 from app.memory_client import MemoryClient
@@ -63,7 +64,7 @@ stm_store = STMStore(session_ttl_seconds=STM_TTL_SECONDS)
 async def _flush_expired_stm_loop() -> None:
     """Background loop: flush expired STM sessions to the global memory-layer."""
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(10)
         try:
             expired = stm_store.get_expired_sessions()
             for session_data in expired:
@@ -72,13 +73,7 @@ async def _flush_expired_stm_loop() -> None:
                 messages: list = session_data["messages"]
                 try:
                     if messages:
-                        await memory_client.add_messages(
-                            user_id=user_id,
-                            messages=[
-                                {"role": m["role"], "content": m["content"]}
-                                for m in messages
-                            ],
-                        )
+                        await persist_memory_background(user_id, messages)
                     stm_store.end_session(session_id)
                     log_event(
                         "stm_flushed_to_memory",
@@ -302,32 +297,38 @@ async def recover_from_neighbor(
 
 
 async def retrieve_memories(user_id: str, query: str, limit: int) -> tuple[List[str], str]:
-    cached = ltm_cache.get(user_id)
-    if cached is not None:
-        return cached, "cache"
+    full = ltm_cache.get_full(user_id)
+    if full is not None:
+        all_memories, embeddings = full
+        source = "cache"
+    else:
+        all_memories = await memory_client.get_all(user_id=user_id)
+        embeddings = local_search.embed(all_memories)
+        ltm_cache.set(user_id, all_memories, embeddings)
+        source = "memory-layer"
 
-    memories = await memory_client.search(user_id=user_id, query=query, limit=limit)
-    ltm_cache.set(user_id, memories)
-    return memories, "memory-layer"
+    relevant = local_search.search_relevant(query, all_memories, embeddings, top_k=limit)
+    return relevant, source
 
 
 async def persist_memory_background(
-    user_id: str, user_prompt: str, assistant_output: str
+    user_id: str,
+    messages: list,
 ) -> None:
+    log_event("memory_persist_started", {"userId": user_id, "messageCount": len(messages)})
     try:
-        await memory_client.add_messages(
+        extracted = await memory_client.add_messages(
             user_id=user_id,
-            messages=[
-                {"role": "user", "content": user_prompt},
-                {"role": "assistant", "content": assistant_output},
-            ],
+            messages=[{"role": m["role"], "content": m["content"]} for m in messages],
         )
+        ltm_cache.invalidate(user_id)
         log_event(
             "memory_persist_completed",
-            {"userId": user_id, "storedMessages": 2},
+            {"userId": user_id, "storedMessages": len(messages), "extractedFacts": extracted},
         )
     except Exception as e:
         log_event("memory_persist_failed", {"userId": user_id, "error": str(e)})
+        raise
 
 
 # Endpoints
@@ -444,6 +445,8 @@ def debug_user_state(userId: str, sessionId: Optional[str] = None):
             exported = stm_store.export_session(sessionId)
             if exported is not None and exported["userId"] == userId:
                 stm = exported
+        if stm is None:
+            stm = stm_store.find_latest_by_user_id(userId)
 
         ltm = ltm_cache.snapshot(userId)
 
@@ -607,9 +610,11 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
 
         stm_started = time.perf_counter()
         try:
-            stm_store.get_or_create(session_id=session_id, user_id=req.userId)
+            stm_session = stm_store.get_or_create(session_id=session_id, user_id=req.userId)
         except ValueError as e:
             raise HTTPException(status_code=403, detail=str(e))
+        # get_or_create may assign a new UUID when the requested session had expired
+        session_id = stm_session.session_id
 
         local_session_registry.touch(
             user_id=req.userId,
@@ -724,6 +729,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                     "clientSpeed": speed,
                 }
             else:
+                full_ltm = ltm_cache.get(req.userId) or memories
                 package = build_handover_package(
                     user_id=req.userId,
                     session_id=session_id,
@@ -731,7 +737,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                     transfer_reason="predictive_client_mobility",
                     client_direction=req.clientDirection,
                     client_speed=speed,
-                    memories=memories,
+                    memories=full_ltm,
                 )
                 background_tasks.add_task(
                     send_handover_package,
@@ -752,8 +758,10 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
         background_tasks.add_task(
             persist_memory_background,
             req.userId,
-            req.prompt,
-            output,
+            [
+                {"role": "user", "content": req.prompt},
+                {"role": "assistant", "content": output},
+            ],
         )
 
         finished = time.perf_counter()
@@ -831,12 +839,20 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
 
 
 @app.post("/session/end")
-def end_session(req: SessionEndRequest):
+async def end_session(req: SessionEndRequest, background_tasks: BackgroundTasks):
     session = stm_store.export_session(req.sessionId)
     if session is not None and session["userId"] != req.userId:
         raise HTTPException(status_code=403, detail="Session belongs to a different user")
 
     cleared = stm_store.end_session(req.sessionId)
+
+    if session and session.get("messages"):
+        background_tasks.add_task(
+            persist_memory_background,
+            session["userId"],
+            session["messages"],
+        )
+
     return {
         "ok": True,
         "sessionId": req.sessionId,

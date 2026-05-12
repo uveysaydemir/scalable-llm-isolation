@@ -1,10 +1,12 @@
-import { CSSProperties, FormEvent, useEffect, useMemo, useState } from "react";
+import { CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Loader2,
   SendHorizontal,
   Settings,
+  User,
 } from "lucide-react";
 import { Toaster, toast } from "sonner";
 
@@ -14,10 +16,12 @@ import dbAsset from "./assets/db.avif";
 import {
   EdgeKey,
   GenerateResponse,
+  GlobalMemoryEntry,
   HealthResponse,
   exportHandoverPackage,
   fetchEdgeHealth,
   fetchEdgeUserState,
+  fetchGlobalMemories,
   fetchRuntimeSettings,
   generate,
   importHandoverPackage,
@@ -59,6 +63,13 @@ type UserEdgeState = {
 
 type EdgePanelState = Record<UserId, UserEdgeState>;
 type TransferEndpoint = EdgeKey | "global";
+
+type ChatMessage = {
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string;
+  edge: EdgeKey;
+};
 
 type TransferNotice = {
   id: number;
@@ -140,6 +151,16 @@ const oppositeEdgeId: Record<EdgeKey, string> = {
   right: "edge-node-left",
 };
 
+function calcBytes(data: unknown): number {
+  return new TextEncoder().encode(JSON.stringify(data)).length;
+}
+
+function fmtBytes(n: number): string {
+  if (n === 0) return "0 B";
+  if (n < 1024) return `${n} B`;
+  return `${(n / 1024).toFixed(1)} KB`;
+}
+
 export default function App() {
   const [users, setUsers] = useState<UserState[]>(usersInitial);
   const [message, setMessage] = useState("");
@@ -155,13 +176,26 @@ export default function App() {
     null,
   );
   const [nowMs, setNowMs] = useState(Date.now());
-  const [memoryDialogOpen, setMemoryDialogOpen] = useState(false);
+  const [sideSheetOpen, setSideSheetOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsForm, setSettingsForm] = useState({
     sessionTtlSeconds: 120,
     ltmCacheTtlSeconds: 300,
   });
+  const [chatHistory, setChatHistory] = useState<Record<UserId, ChatMessage[]>>({
+    1: [],
+    2: [],
+    3: [],
+  });
+
+  const prevEdgePanelRef = useRef<Record<EdgeKey, EdgePanelState>>({
+    left: emptyEdgePanel,
+    right: emptyEdgePanel,
+  });
+  useEffect(() => {
+    prevEdgePanelRef.current = edgePanel;
+  }, [edgePanel]);
 
   const selectedUser = useMemo(
     () => users.find((user) => user.selected) ?? users[0],
@@ -246,16 +280,12 @@ export default function App() {
       );
 
       if (!cancelled) {
-        setEdgePanel((current) => {
-          const persistenceNotices = collectPersistenceNotices(
-            current,
-            nextPanel,
-          );
-          window.setTimeout(() => {
-            persistenceNotices.forEach((notice) => showTransferNotice(notice));
-          }, 0);
-          return mergeEdgePanelPoll(current, nextPanel);
-        });
+        const persistenceNotices = collectPersistenceNotices(
+          prevEdgePanelRef.current,
+          nextPanel,
+        );
+        persistenceNotices.forEach((notice) => showTransferNotice(notice));
+        setEdgePanel((current) => mergeEdgePanelPoll(current, nextPanel));
       }
     }
 
@@ -359,10 +389,13 @@ export default function App() {
           },
         },
       }));
+      const stmMsgs = exported.package.stm?.messages ?? [];
+      const stmPkgSize = stmMsgs.length > 0 ? fmtBytes(calcBytes(stmMsgs)) : "0 B";
+      const ltmPkgSize = fmtBytes(calcBytes(exported.package.ltm));
       showTransferNotice({
         from: source,
         to: target,
-        text: `pretransfer user-${user.id}: ${edgeIdByKey[source]} -> ${edgeIdByKey[target]}, STM ${imported.stmImported ? "yes" : "no"}, LTM ${imported.ltmCount}`,
+        text: `pretransfer user-${user.id}: ${edgeIdByKey[source]} → ${edgeIdByKey[target]}, STM ${stmPkgSize}, LTM ${ltmPkgSize}`,
       });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -515,9 +548,18 @@ export default function App() {
         maxNewTokens: 32,
       });
 
-      updateUserAfterResponse(selectedUser.id, edge, cachePhase, response);
+      updateUserAfterResponse(selectedUser.id, edge, cachePhase, response, trimmed);
       showMemoryFetchNotice(selectedUser.id, edge, response);
       showTransferNoticeFromResponse(selectedUser.id, edge, response);
+      const ts = new Date().toISOString();
+      setChatHistory((current) => ({
+        ...current,
+        [selectedUser.id]: [
+          ...current[selectedUser.id],
+          { role: "user", content: trimmed, timestamp: ts, edge },
+          { role: "assistant", content: response.output, timestamp: ts, edge },
+        ],
+      }));
       setMessage("");
       toast.success(
         `Answer for user${selectedUser.id}: ${response.output || "(empty)"}`,
@@ -556,10 +598,15 @@ export default function App() {
     if (proactive?.scheduled && proactive.targetEdgeId) {
       const target = edgeKeyFromEdgeId(proactive.targetEdgeId);
       if (target) {
+        const src = edgePanel[requestEdge][id];
+        const stmSize = proactive.stmIncluded
+          ? fmtBytes(calcBytes(src.stmMessages))
+          : "0 B";
+        const ltmSize = fmtBytes(calcBytes(src.ltmMemories));
         showTransferNotice({
           from: requestEdge,
           to: target,
-          text: `pretransfer user-${id}: ${edgeIdByKey[requestEdge]} -> ${proactive.targetEdgeId}, STM ${proactive.stmIncluded ? "yes" : "no"}, LTM ${proactive.ltmCount ?? 0}`,
+          text: `pretransfer user-${id}: ${edgeIdByKey[requestEdge]} → ${proactive.targetEdgeId}, STM ${stmSize}, LTM ${ltmSize}`,
         });
       }
     }
@@ -568,10 +615,14 @@ export default function App() {
     if (recovery?.attempted && recovery.recovered && recovery.sourceEdgeId) {
       const source = edgeKeyFromEdgeId(recovery.sourceEdgeId);
       if (source) {
+        const stmSize = recovery.stmImported
+          ? fmtBytes(calcBytes(edgePanel[requestEdge][id].stmMessages))
+          : "0 B";
+        const ltmSize = fmtBytes(calcBytes(edgePanel[requestEdge][id].ltmMemories));
         showTransferNotice({
           from: source,
           to: requestEdge,
-          text: `nearby fetch user-${id}: ${recovery.sourceEdgeId} -> ${edgeIdByKey[requestEdge]}, STM ${recovery.stmImported ? "yes" : "no"}, LTM ${recovery.ltmCount ?? 0}`,
+          text: `nearby fetch user-${id}: ${recovery.sourceEdgeId} → ${edgeIdByKey[requestEdge]}, STM ${stmSize}, LTM ${ltmSize}`,
         });
       }
     }
@@ -592,6 +643,7 @@ export default function App() {
     edge: EdgeKey,
     cachePhase: "cold" | "hot",
     response: GenerateResponse,
+    prompt: string,
   ) {
     setUsers((current) =>
       current.map((user) =>
@@ -614,23 +666,30 @@ export default function App() {
 
     const sourceEdge =
       response.metrics.edgeNodeId === "edge-node-right" ? "right" : edge;
-    setEdgePanel((current) => ({
-      ...current,
-      [sourceEdge]: {
-        ...current[sourceEdge],
-        [id]: {
-          stm: true,
-          ltmCached: true,
-          ltmCount: current[sourceEdge][id].ltmCount,
-          cachePhase,
-          stmExpiresAt: Date.now() + getSessionTtlMs(sourceEdge),
-          ltmExpiresAt: Date.now() + getLtmTtlMs(sourceEdge),
-          stmMessages: current[sourceEdge][id].stmMessages,
-          ltmMemories: current[sourceEdge][id].ltmMemories,
-          lastSeen: new Date().toLocaleTimeString(),
+    setEdgePanel((current) => {
+      const prev = current[sourceEdge][id];
+      return {
+        ...current,
+        [sourceEdge]: {
+          ...current[sourceEdge],
+          [id]: {
+            stm: true,
+            ltmCached: true,
+            ltmCount: prev.ltmCount,
+            cachePhase,
+            stmExpiresAt: Date.now() + getSessionTtlMs(sourceEdge),
+            ltmExpiresAt: Date.now() + getLtmTtlMs(sourceEdge),
+            stmMessages: [
+              ...prev.stmMessages,
+              { role: "user", content: prompt },
+              { role: "assistant", content: response.output },
+            ],
+            ltmMemories: prev.ltmMemories,
+            lastSeen: new Date().toLocaleTimeString(),
+          },
         },
-      },
-    }));
+      };
+    });
   }
 
   return (
@@ -690,14 +749,6 @@ export default function App() {
         </button>
       </form>
 
-      {/* <button
-        type="button"
-        className="memoryTrigger"
-        onClick={() => setMemoryDialogOpen(true)}
-      >
-        User {selectedUser.id} memory
-      </button> */}
-
       <button
         type="button"
         className="settingsTrigger"
@@ -708,11 +759,21 @@ export default function App() {
         <span>Settings</span>
       </button>
 
-      {memoryDialogOpen ? (
-        <MemoryDialog
+      <button
+        type="button"
+        className="memoryDetailsTrigger"
+        aria-label="Open user memory details"
+        onClick={() => setSideSheetOpen(true)}
+      >
+        <User size={20} />
+        <span>User {selectedUser.id}</span>
+      </button>
+
+      {sideSheetOpen ? (
+        <UserSideSheet
           user={selectedUser}
-          panel={edgePanel}
-          onClose={() => setMemoryDialogOpen(false)}
+          chatHistory={chatHistory[selectedUser.id]}
+          onClose={() => setSideSheetOpen(false)}
         />
       ) : null}
 
@@ -737,6 +798,7 @@ function EdgeNode(props: {
   users: UserState[];
   nowMs: number;
 }) {
+  const [expandedUser, setExpandedUser] = useState<UserId | null>(null);
   const online = props.health?.ok === true;
 
   return (
@@ -761,10 +823,6 @@ function EdgeNode(props: {
             label="ltm cache"
             value={props.health?.ltmCache?.entryCount ?? 0}
           />
-          {/* <Metric
-            label="local registry"
-            value={props.health?.localSessionRegistry?.entryCount ?? 0}
-          /> */}
         </div>
         <div className="userStateList">
           {props.users.map((user) => {
@@ -777,29 +835,85 @@ function EdgeNode(props: {
             );
             const visibleCachePhase =
               stmActive || ltmActive ? state.cachePhase : "idle";
+            const isExpanded = expandedUser === user.id;
+
             return (
-              <div className="userStateRow" key={user.id}>
-                <div className="userStateName">
-                  {user.active && user.lastEdge === props.edge ? (
-                    <Loader2 className="spinIcon" size={15} />
-                  ) : null}
-                  <span>User {user.id}</span>
+              <div
+                key={user.id}
+                className={`userStateRow${isExpanded ? " userStateRow--open" : ""}`}
+                role="button"
+                tabIndex={0}
+                onClick={() => setExpandedUser(isExpanded ? null : user.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ")
+                    setExpandedUser(isExpanded ? null : user.id);
+                }}
+              >
+                <div className="userStateRowInner">
+                  <div className="userStateName">
+                    {user.active && user.lastEdge === props.edge ? (
+                      <Loader2 className="spinIcon" size={15} />
+                    ) : null}
+                    <span>User {user.id}</span>
+                    <ChevronDown
+                      size={12}
+                      className={`expandChevron${isExpanded ? " expandChevron--open" : ""}`}
+                    />
+                  </div>
+                  <span>{visibleCachePhase}</span>
+                  <TimerCell
+                    label="STM"
+                    active={stmActive}
+                    expiresAt={state.stmExpiresAt}
+                    ttlSeconds={props.health?.localSessionRegistry?.ttlSeconds}
+                    nowMs={props.nowMs}
+                  />
+                  <TimerCell
+                    label="LTM"
+                    active={ltmActive}
+                    expiresAt={state.ltmExpiresAt}
+                    ttlSeconds={props.health?.ltmCache?.ttlSeconds}
+                    nowMs={props.nowMs}
+                  />
                 </div>
-                <span>{visibleCachePhase}</span>
-                <TimerCell
-                  label="STM"
-                  active={stmActive}
-                  expiresAt={state.stmExpiresAt}
-                  ttlSeconds={props.health?.localSessionRegistry?.ttlSeconds}
-                  nowMs={props.nowMs}
-                />
-                <TimerCell
-                  label="LTM"
-                  active={ltmActive}
-                  expiresAt={state.ltmExpiresAt}
-                  ttlSeconds={props.health?.ltmCache?.ttlSeconds}
-                  nowMs={props.nowMs}
-                />
+
+                {isExpanded && (
+                  <div className="userStateExpanded">
+                    <div className="userStateExpSection">
+                      <span className="userStateExpLabel">STM</span>
+                      {state.stmMessages.length > 0 ? (
+                        <div className="userStateExpMessages">
+                          {state.stmMessages.map((msg, i) => (
+                            <div
+                              key={i}
+                              className={`userStateExpMsg userStateExpMsg--${msg.role}`}
+                            >
+                              <span className="userStateExpRole">{msg.role}</span>
+                              <p>{msg.content}</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="userStateExpEmpty">No session on this edge.</p>
+                      )}
+                    </div>
+
+                    <div className="userStateExpSection">
+                      <span className="userStateExpLabel">LTM cache</span>
+                      {state.ltmMemories.length > 0 ? (
+                        <div className="userStateExpMems">
+                          {state.ltmMemories.map((mem, i) => (
+                            <div key={i} className="userStateExpMemItem">
+                              <p>{mem}</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="userStateExpEmpty">No LTM cache on this edge.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -827,6 +941,7 @@ function TimerCell(props: {
   expiresAt?: number;
   ttlSeconds?: number;
   nowMs: number;
+  size?: string | null;
 }) {
   if (
     !props.active ||
@@ -847,13 +962,18 @@ function TimerCell(props: {
 
   return (
     <span className="timerCell">
-      <span>{props.label}</span>
-      <span
-        className="timerRing"
-        style={{ "--progress": `${progress * 360}deg` } as CSSProperties}
-      >
-        {remainingSeconds}
+      <span className="timerCellTop">
+        <span>{props.label}</span>
+        <span
+          className="timerRing"
+          style={{ "--progress": `${progress * 360}deg` } as CSSProperties}
+        >
+          {remainingSeconds}
+        </span>
       </span>
+      {props.size != null && (
+        <span className="timerSize">{props.size}</span>
+      )}
     </span>
   );
 }
@@ -867,90 +987,236 @@ function Metric(props: { label: string; value: string | number }) {
   );
 }
 
-function MemoryDialog(props: {
+type SheetEdge = {
+  stm: boolean;
+  ltmCached: boolean;
+  stmMessages: Array<{ role: string; content: string }>;
+  ltmMemories: string[];
+};
+
+const emptySheetEdge: SheetEdge = {
+  stm: false,
+  ltmCached: false,
+  stmMessages: [],
+  ltmMemories: [],
+};
+
+function UserSideSheet(props: {
   user: UserState;
-  panel: Record<EdgeKey, EdgePanelState>;
+  chatHistory: ChatMessage[];
   onClose: () => void;
 }) {
+  const [edges, setEdges] = useState<Record<EdgeKey, SheetEdge>>({
+    left: emptySheetEdge,
+    right: emptySheetEdge,
+  });
+  const [globalMemories, setGlobalMemories] = useState<GlobalMemoryEntry[]>([]);
+  const [globalLoading, setGlobalLoading] = useState(true);
+  const [globalError, setGlobalError] = useState<string | null>(null);
+  const sheetRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function poll() {
+      const uid = userId(props.user.id);
+      const sid = props.user.sessionId;
+
+      const [leftRes, rightRes, globalRes] = await Promise.allSettled([
+        fetchEdgeUserState("left", { userId: uid, sessionId: sid }),
+        fetchEdgeUserState("right", { userId: uid, sessionId: sid }),
+        fetchGlobalMemories(uid),
+      ]);
+
+      if (cancelled) return;
+
+      const mapEdge = (res: typeof leftRes): SheetEdge => {
+        if (res.status !== "fulfilled") return emptySheetEdge;
+        const s = res.value;
+        return {
+          stm: s.stm !== null,
+          ltmCached: s.ltm.present,
+          stmMessages: s.stm?.messages ?? [],
+          ltmMemories: s.ltm.memories,
+        };
+      };
+
+      setEdges({ left: mapEdge(leftRes), right: mapEdge(rightRes) });
+
+      if (globalRes.status === "fulfilled") {
+        setGlobalMemories(globalRes.value);
+        setGlobalError(null);
+      } else {
+        setGlobalError(
+          globalRes.reason instanceof Error
+            ? globalRes.reason.message
+            : String(globalRes.reason),
+        );
+      }
+      setGlobalLoading(false);
+    }
+
+    poll();
+    const interval = window.setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [props.user.id, props.user.sessionId]);
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") props.onClose();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [props.onClose]);
+
   return (
-    <div
-      className="memoryDialogBackdrop"
-      role="presentation"
-      onMouseDown={props.onClose}
-    >
-      <section
-        className="memoryDialog"
-        role="dialog"
-        aria-modal="true"
-        aria-label={`Memory for user ${props.user.id}`}
-        onMouseDown={(event) => event.stopPropagation()}
+    <>
+      <div
+        className="sideSheetBackdrop"
+        role="presentation"
+        onClick={props.onClose}
+      />
+      <aside
+        className="sideSheet"
+        role="complementary"
+        aria-label={`Memory details for user ${props.user.id}`}
+        ref={sheetRef}
       >
-        <div className="memoryDialogHeader">
+        <div className="sideSheetHeader">
           <div>
-            <strong>User {props.user.id} memory</strong>
+            <strong>User {props.user.id}</strong>
             <span>
               {props.user.sessionId
-                ? `session ${props.user.sessionId}`
+                ? `session ${props.user.sessionId.slice(0, 8)}…`
                 : "no active session"}
             </span>
           </div>
-          <button type="button" onClick={props.onClose}>
-            Close
+          <button type="button" aria-label="Close" onClick={props.onClose}>
+            ✕
           </button>
         </div>
 
-        <div className="memoryDialogGrid">
-          {(["left", "right"] as EdgeKey[]).map((edge) => {
-            const state = props.panel[edge][props.user.id];
-            return (
-              <div className="memoryColumn" key={edge}>
-                <h3>{edgeIdByKey[edge]}</h3>
-                <section>
-                  <h4>STM chat history</h4>
-                  {state.stmMessages.length > 0 ? (
-                    <div className="memoryList">
-                      {state.stmMessages.map((message, index) => (
-                        <div
-                          className="memoryItem"
-                          key={`${edge}-stm-${index}`}
-                        >
-                          <span>{message.role}</span>
-                          <p>{message.content}</p>
-                        </div>
-                      ))}
+        <div className="sideSheetBody">
+          <div className="sideSheetSection sideSheetLocalHistory">
+            <div className="sideSheetSectionHead">
+              <span>Chat history</span>
+              <span className="ssSubtitle">local · {Math.floor(props.chatHistory.length / 2)} turns</span>
+            </div>
+            {props.chatHistory.length === 0 ? (
+              <p className="ssEmpty">No messages yet.</p>
+            ) : (
+              <div className="ssChatHistory">
+                {props.chatHistory.map((msg, i) => (
+                  <div key={i} className={`ssChatMsg ssChatMsg--${msg.role}`}>
+                    <div className="ssChatMsgMeta">
+                      <span className="ssChatRole">{msg.role}</span>
+                      <span className="ssChatEdge">{edgeIdByKey[msg.edge]}</span>
+                      <span className="ssChatTime">
+                        {new Date(msg.timestamp).toLocaleTimeString()}
+                      </span>
                     </div>
-                  ) : (
-                    <p className="emptyMemory">No STM on this edge.</p>
-                  )}
-                </section>
-                <section>
-                  <h4>LTM cache</h4>
-                  {state.ltmMemories.length > 0 ? (
-                    <div className="memoryList">
-                      {state.ltmMemories.map((memory, index) => (
-                        <div
-                          className="memoryItem"
-                          key={`${edge}-ltm-${index}`}
-                        >
-                          <span>memory {index + 1}</span>
-                          <p>{memory}</p>
-                        </div>
-                      ))}
-                    </div>
-                  ) : state.ltmCached ? (
-                    <p className="emptyMemory">
-                      LTM cache is present, but it has no memory strings.
-                    </p>
-                  ) : (
-                    <p className="emptyMemory">No LTM cache on this edge.</p>
-                  )}
-                </section>
+                    <p>{msg.content}</p>
+                  </div>
+                ))}
               </div>
-            );
-          })}
+            )}
+          </div>
+
+          <div className="sideSheetEdgeGrid">
+            {(["left", "right"] as EdgeKey[]).map((edge) => {
+              const state = edges[edge];
+              const stmSize = state.stmMessages.length > 0 ? fmtBytes(calcBytes(state.stmMessages)) : null;
+              const ltmSize = state.ltmMemories.length > 0 ? fmtBytes(calcBytes(state.ltmMemories)) : null;
+              return (
+                <div className="sideSheetEdgeCol" key={edge}>
+                  <h3 className="sideSheetEdgeTitle">{edgeIdByKey[edge]}</h3>
+
+                  <div className="sideSheetSection">
+                    <div className="sideSheetSectionHead">
+                      <span>STM</span>
+                      {stmSize != null && (
+                        <span className="ssSize">{stmSize}</span>
+                      )}
+                    </div>
+                    {state.stmMessages.length > 0 ? (
+                      <div className="ssChatHistory">
+                        {state.stmMessages.map((msg, i) => (
+                          <div
+                            key={`${edge}-stm-${i}`}
+                            className={`ssChatMsg ssChatMsg--${msg.role}`}
+                          >
+                            <span className="ssChatRole">{msg.role}</span>
+                            <p>{msg.content}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="ssEmpty">No session on this edge.</p>
+                    )}
+                  </div>
+
+                  <div className="sideSheetSection">
+                    <div className="sideSheetSectionHead">
+                      <span>LTM cache</span>
+                      {ltmSize != null && (
+                        <span className="ssSize">{ltmSize}</span>
+                      )}
+                    </div>
+                    {state.ltmMemories.length > 0 ? (
+                      <div className="ssMemList">
+                        {state.ltmMemories.map((mem, i) => (
+                          <div key={`${edge}-ltm-${i}`} className="ssMemItem">
+                            <p>{mem}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="ssEmpty">No LTM cache on this edge.</p>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="sideSheetGlobal">
+            <div className="sideSheetSectionHead sideSheetSectionHead--global">
+              <span>Global LTM</span>
+              {!globalLoading && !globalError && (
+                <span className="ssSize">
+                  {fmtBytes(calcBytes(globalMemories))}
+                </span>
+              )}
+            </div>
+            {globalLoading ? (
+              <p className="ssEmpty ssEmpty--loading">
+                <Loader2 className="spinIcon" size={13} /> Fetching…
+              </p>
+            ) : globalError ? (
+              <p className="ssEmpty ssEmpty--error">{globalError}</p>
+            ) : globalMemories.length > 0 ? (
+              <div className="ssMemList">
+                {globalMemories.map((entry, i) => (
+                  <div key={entry.id ?? i} className="ssMemItem">
+                    <p>{entry.memory}</p>
+                    {entry.updated_at && (
+                      <span className="ssMemMeta">
+                        {new Date(entry.updated_at).toLocaleString()}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="ssEmpty">No memories in global store.</p>
+            )}
+          </div>
         </div>
-      </section>
-    </div>
+      </aside>
+    </>
   );
 }
 
@@ -1194,10 +1460,11 @@ function collectPersistenceNotices(
       const hadStm = current[edge][id].stm;
       const hasStm = next[edge][id].stm;
       if (hadStm && !hasStm) {
+        const stmSize = fmtBytes(calcBytes(current[edge][id].stmMessages));
         notices.push({
           from: edge,
           to: "global",
-          text: `memory persist user-${id}: ${edgeIdByKey[edge]} -> global memory`,
+          text: `memory persist user-${id}: ${edgeIdByKey[edge]} → global memory, STM ${stmSize}`,
         });
       }
     });
@@ -1228,9 +1495,16 @@ function mergeUserEdgeState(
   return {
     ...next,
     ltmExpiresAt: next.ltmExpiresAt ?? current.ltmExpiresAt,
+    // Only carry forward cached messages/memories while the owning flag is still
+    // active. If stm/ltmCached flipped to false the data must be cleared even
+    // though the array happens to be empty in `next`.
     stmMessages:
-      next.stmMessages.length > 0 ? next.stmMessages : current.stmMessages,
+      next.stm && next.stmMessages.length === 0
+        ? current.stmMessages
+        : next.stmMessages,
     ltmMemories:
-      next.ltmMemories.length > 0 ? next.ltmMemories : current.ltmMemories,
+      next.ltmCached && next.ltmMemories.length === 0
+        ? current.ltmMemories
+        : next.ltmMemories,
   };
 }
