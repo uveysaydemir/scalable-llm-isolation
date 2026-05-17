@@ -80,3 +80,30 @@ def add_memory(payload: dict):
     except Exception as e:
         logger.error("embedding add failed userId=%s error=%s", user_id, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"embedding add failed: {e}")
+
+
+@app.post("/memory/replace")
+def replace_memory(payload: dict):
+    user_id = payload.get("userId")
+    facts = payload.get("facts", [])
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+
+    try:
+        result = memory_service.replace_all(user_id=user_id, facts=facts)
+        stored = len(result.get("results", []))
+        logger.info(
+            "memory replace completed userId=%s facts_in=%d stored=%d",
+            user_id,
+            len(facts),
+            stored,
+        )
+        return {
+            "ok": True,
+            "userId": user_id,
+            "replacedWith": stored,
+        }
+    except Exception as e:
+        logger.error("memory replace failed userId=%s error=%s", user_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"memory replace failed: {e}")

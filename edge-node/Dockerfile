@@ -5,11 +5,8 @@ WORKDIR /app
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-ARG TORCH_VERSION=2.7.1
-
 COPY requirements.txt .
-RUN pip install --index-url https://download.pytorch.org/whl/cpu "torch==${TORCH_VERSION}" \
-    && pip install -r requirements.txt
+RUN pip install -r requirements.txt
 
 COPY app ./app
 

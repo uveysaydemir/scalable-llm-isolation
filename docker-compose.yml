@@ -6,34 +6,6 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
 
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-
-  ollama-init:
-    image: ollama/ollama:latest
-    depends_on:
-      ollama:
-        condition: service_healthy
-    environment:
-      OLLAMA_HOST: http://ollama:11434
-      OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-llama3.2:1b}
-      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-nomic-embed-text}
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "
-      ollama pull ${OLLAMA_LLM_MODEL} &&
-      ollama pull ${OLLAMA_EMBED_MODEL}
-      "
-
   memory-layer:
     image: scalable-llm-isolation-memory-layer
     build:
@@ -47,16 +19,12 @@ services:
     depends_on:
       qdrant:
         condition: service_started
-      ollama:
-        condition: service_healthy
-      ollama-init:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8090/health')\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 30
-      start_period: 90s
+      start_period: 30s
 
   edge-node-left:
     image: scalable-llm-isolation-edge-node
@@ -108,4 +76,3 @@ services:
 
 volumes:
   qdrant_data:
-  ollama_data:

@@ -8,6 +8,7 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    FilterSelector,
     MatchValue,
     PointStruct,
     VectorParams,
@@ -121,3 +122,32 @@ class EmbeddingService:
                 for r in records
             ]
         }
+
+    def replace_all(
+        self, *, user_id: str, facts: List[str]
+    ) -> Dict[str, Any]:
+        """Delete all existing facts for user_id, then insert the new fact list."""
+        self.client.delete(
+            collection_name=QDRANT_COLLECTION,
+            points_selector=FilterSelector(filter=self._user_filter(user_id)),
+        )
+        stored = []
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        for fact in facts:
+            fact = fact.strip()
+            if len(fact) < 5:
+                continue
+            vector = self._embed(fact)
+            point_id = str(uuid.uuid4())
+            self.client.upsert(
+                collection_name=QDRANT_COLLECTION,
+                points=[
+                    PointStruct(
+                        id=point_id,
+                        vector=vector,
+                        payload={"memory": fact, "userId": user_id, "updated_at": now},
+                    )
+                ],
+            )
+            stored.append({"id": point_id})
+        return {"results": stored}

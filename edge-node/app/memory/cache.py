@@ -76,7 +76,7 @@ class LTMCache:
         embeddings = (
             entry.embeddings
             if entry.embeddings is not None
-            else np.empty((0, 384), dtype=np.float32)
+            else np.empty((0, 768), dtype=np.float32)
         )
         return entry.memories, embeddings
 

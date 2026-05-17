@@ -4,13 +4,11 @@ import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from threading import Thread
 from typing import List, Optional
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
 from app.config import (
     EDGE_NODE_ID,
@@ -19,7 +17,8 @@ from app.config import (
     EDGE_TOPOLOGY,
     HANDOVER_FRESHNESS_THRESHOLD_SECONDS,
     MIN_HANDOVER_PREFETCH_SPEED,
-    MODEL_NAME,
+    OLLAMA_BASE_URL,
+    OLLAMA_LLM_MODEL,
     MEMORY_SEARCH_LIMIT,
     LTM_CACHE_TTL_SECONDS,
     STM_TTL_SECONDS,
@@ -47,7 +46,7 @@ from app.memory import local_search
 from app.memory.cache import LTMCache
 from app.memory.stm_store import STMStore
 from app.memory_client import MemoryClient
-from app.prompt_builder import build_messages, build_prompt
+from app.prompt_builder import build_messages
 from app.schemas import (
     GenerateRequest,
     GenerateResponse,
@@ -111,87 +110,78 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Edge Node", lifespan=lifespan)
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
-
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-# Serialises all model.generate calls so extraction and inference never overlap.
-_model_lock = asyncio.Lock()
-
 local_session_registry = LocalSessionRegistry(
     ttl_seconds=HANDOVER_FRESHNESS_THRESHOLD_SECONDS
 )
 
 
-def _run_extraction_sync(messages: list) -> list[str]:
-    """Extract key personal facts from session messages using the loaded model.
-    Runs synchronously — call only via run_in_executor."""
+async def extract_merged_facts(messages: list, existing_facts: list[str]) -> list[str]:
+    """Call Ollama to merge existing LTM facts with new STM conversation."""
     turns = [
         f"{m['role'].capitalize()}: {m['content'].strip()}"
         for m in messages
         if m.get("content", "").strip()
     ]
     if not turns:
-        return []
+        return list(existing_facts)
 
-    conversation = "\n".join(turns)
-    extraction_messages = [
-        {
-            "role": "system",
-            "content": (
-                "Extract key personal facts about the user from the conversation. "
-                "Output one fact per line. Include only concrete facts such as name, "
-                "occupation, location, preferences, relationships, or goals. "
-                "If there are no personal facts, output exactly: none"
-            ),
-        },
-        {
-            "role": "user",
-            "content": f"Conversation:\n{conversation}\n\nFacts:",
-        },
-    ]
-
-    if getattr(tokenizer, "chat_template", None):
-        model_input = tokenizer.apply_chat_template(
-            extraction_messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
-    else:
-        model_input = (
-            "Extract key personal facts about the user from the conversation below.\n"
-            "Output one fact per line. If none, output: none\n\n"
-            f"Conversation:\n{conversation}\n\nFacts:"
-        )
-
-    inputs = tokenizer(model_input, return_tensors="pt")
-    output_ids = model.generate(
-        **inputs,
-        max_new_tokens=128,
-        do_sample=False,
-        pad_token_id=tokenizer.eos_token_id,
+    existing_block = (
+        "\n".join(f"- {f}" for f in existing_facts) if existing_facts else "(none)"
     )
-    new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
-    raw = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    conversation = "\n".join(turns)
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"{OLLAMA_BASE_URL}/api/chat",
+            json={
+                "model": OLLAMA_LLM_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You maintain a personal knowledge base about the user. "
+                            "Your output is the COMPLETE updated knowledge base — not just changes.\n\n"
+                            "Instructions:\n"
+                            "1. Copy every fact from EXISTING KNOWLEDGE into the output.\n"
+                            "2. If the new conversation contradicts an existing fact, replace it.\n"
+                            "3. If the new conversation adds information for a category, update it.\n"
+                            "4. Add any new categories found in the conversation.\n\n"
+                            "Output format: one fact per line as 'category: value' "
+                            "(e.g. 'name: Jack', 'occupation: teacher', 'goals: become an engineer'). "
+                            "For categories with no known value write 'category: unknown'. "
+                            "If nothing is known about the user at all, output exactly: none"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"EXISTING KNOWLEDGE:\n{existing_block}\n\n"
+                            f"NEW CONVERSATION:\n{conversation}\n\n"
+                            "COMPLETE UPDATED KNOWLEDGE BASE:"
+                        ),
+                    },
+                ],
+                "stream": False,
+                "options": {"temperature": 0, "num_predict": 200},
+            },
+        )
+        resp.raise_for_status()
+        raw = resp.json().get("message", {}).get("content", "").strip()
 
     if not raw or raw.lower().startswith("none"):
         return []
 
+    _UNKNOWN_VALUES = re.compile(
+        r":\s*(unknown|none|n/?a|not\s+mentioned|not\s+specified|not\s+stated|unspecified)\s*$",
+        re.IGNORECASE,
+    )
+
     facts = []
     for line in raw.splitlines():
         cleaned = re.sub(r"^[\s\-\*\d\.\)]+", "", line).strip()
-        if len(cleaned) > 5:
+        if len(cleaned) > 5 and not _UNKNOWN_VALUES.search(cleaned):
             facts.append(cleaned)
     return facts
-
-
-async def extract_facts_from_session(messages: list) -> list[str]:
-    """Async wrapper: acquires the model lock then runs extraction in a thread."""
-    loop = asyncio.get_running_loop()
-    async with _model_lock:
-        return await loop.run_in_executor(None, _run_extraction_sync, messages)
 
 
 def elapsed_ms(start: float, end: float | None = None) -> float:
@@ -389,11 +379,11 @@ async def retrieve_memories(user_id: str, query: str, limit: int) -> tuple[List[
         source = "cache"
     else:
         all_memories = await memory_client.get_all(user_id=user_id)
-        embeddings = local_search.embed(all_memories)
+        embeddings = await local_search.embed(all_memories)
         ltm_cache.set(user_id, all_memories, embeddings)
         source = "memory-layer"
 
-    relevant = local_search.search_relevant(query, all_memories, embeddings, top_k=limit)
+    relevant = await local_search.search_relevant(query, all_memories, embeddings, top_k=limit)
     return relevant, source
 
 
@@ -403,24 +393,30 @@ async def persist_memory_background(
 ) -> None:
     log_event("memory_persist_started", {"userId": user_id, "messageCount": len(messages)})
     try:
-        facts = await extract_facts_from_session(messages)
-        log_event("memory_facts_extracted", {"userId": user_id, "factCount": len(facts), "facts": facts})
+        # Load existing LTM so the model can merge/update stale facts
+        existing_facts = await memory_client.get_all(user_id=user_id)
+        log_event("memory_ltm_loaded", {"userId": user_id, "existingFactCount": len(existing_facts)})
 
-        if facts:
-            persist_messages = [{"role": "user", "content": f} for f in facts]
-        else:
-            # Fall back to raw user messages if the model found nothing
-            persist_messages = [
-                {"role": m["role"], "content": m["content"]}
-                for m in messages
-                if m.get("role") == "user"
-            ]
+        merged_facts = await extract_merged_facts(messages, existing_facts)
+        log_event("memory_facts_merged", {"userId": user_id, "factCount": len(merged_facts), "facts": merged_facts})
 
-        stored = await memory_client.add_messages(user_id=user_id, messages=persist_messages)
+        if not merged_facts:
+            # Model found nothing useful — keep existing facts untouched
+            log_event("memory_persist_skipped", {"userId": user_id, "reason": "no_facts_extracted"})
+            await broadcast_sse_event({
+                "type": "persistence_completed",
+                "userId": user_id,
+                "edgeNodeId": EDGE_NODE_ID,
+                "stored": 0,
+            })
+            return
+
+        # Atomically replace old LTM with the merged set
+        stored = await memory_client.replace_messages(user_id=user_id, facts=merged_facts)
         ltm_cache.invalidate(user_id)
         log_event(
             "memory_persist_completed",
-            {"userId": user_id, "storedMessages": len(messages), "extractedFacts": stored},
+            {"userId": user_id, "existingFacts": len(existing_facts), "mergedFacts": stored},
         )
         await broadcast_sse_event({
             "type": "persistence_completed",
@@ -478,7 +474,7 @@ def health():
         "ok": True,
         "service": "edge-node",
         "edgeNodeId": EDGE_NODE_ID,
-        "modelName": MODEL_NAME,
+        "modelName": OLLAMA_LLM_MODEL,
         "ltmCache": ltm_cache.stats(),
         "localSessionRegistry": local_session_registry.stats(),
         "stm": stm_store.stats(),
@@ -778,53 +774,43 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
             memories=memories,
             history=stm_history,
         )
-
-        if getattr(tokenizer, "chat_template", None):
-            model_input = tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-        else:
-            model_input = build_prompt(
-                user_prompt=req.prompt,
-                memories=memories,
-                history=stm_history,
-            )
         timings["promptBuildMs"] = elapsed_ms(prompt_started)
 
-        tokenization_started = time.perf_counter()
-        inputs = tokenizer(model_input, return_tensors="pt")
-        timings["tokenizationMs"] = elapsed_ms(tokenization_started)
-        streamer = TextIteratorStreamer(
-            tokenizer,
-            skip_prompt=True,
-            skip_special_tokens=True,
-        )
-
-        generation_kwargs = {
-            **inputs,
-            "streamer": streamer,
-            "max_new_tokens": req.maxNewTokens or 64,
-            "do_sample": True,
-            "temperature": 0.2,
-            "top_p": 0.9,
-            "pad_token_id": tokenizer.eos_token_id,
-        }
-
         inference_started = time.perf_counter()
-        thread = Thread(target=model.generate, kwargs=generation_kwargs)
-        thread.start()
-
         first_token_time = None
         chunks = []
 
-        for chunk in streamer:
-            if first_token_time is None:
-                first_token_time = time.perf_counter()
-            chunks.append(chunk)
-
-        thread.join()
+        _inf_timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
+        async with httpx.AsyncClient(timeout=_inf_timeout) as _client:
+            async with _client.stream(
+                "POST",
+                f"{OLLAMA_BASE_URL}/api/chat",
+                json={
+                    "model": OLLAMA_LLM_MODEL,
+                    "messages": messages,
+                    "stream": True,
+                    "options": {
+                        "num_predict": req.maxNewTokens or 256,
+                        "temperature": 0.2,
+                        "top_p": 0.9,
+                    },
+                },
+            ) as _resp:
+                _resp.raise_for_status()
+                async for _line in _resp.aiter_lines():
+                    if not _line:
+                        continue
+                    try:
+                        _data = json.loads(_line)
+                    except json.JSONDecodeError:
+                        continue
+                    _chunk = _data.get("message", {}).get("content", "")
+                    if _chunk:
+                        if first_token_time is None:
+                            first_token_time = time.perf_counter()
+                        chunks.append(_chunk)
+                    if _data.get("done"):
+                        break
 
         inference_finished = time.perf_counter()
         output = "".join(chunks).strip()
@@ -893,15 +879,6 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 }
         timings["postInferenceMs"] = elapsed_ms(postprocess_started)
 
-        background_tasks.add_task(
-            persist_memory_background,
-            req.userId,
-            [
-                {"role": "user", "content": req.prompt},
-                {"role": "assistant", "content": output},
-            ],
-        )
-
         finished = time.perf_counter()
         total_ms = elapsed_ms(started, finished)
         inference_ms = timings.get("inferenceMs")
@@ -921,7 +898,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 "sessionId": session_id,
                 "clientDirection": req.clientDirection,
                 "clientSpeed": req.clientSpeed,
-                "model": MODEL_NAME,
+                "model": OLLAMA_LLM_MODEL,
                 "promptChars": len(req.prompt),
                 "memoryCount": len(memories),
                 "memorySource": memory_source,
@@ -946,7 +923,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 "inferenceMs": timings["inferenceMs"],
                 "inferenceExcludedMs": timings["inferenceExcludedMs"],
                 "timings": timings,
-                "modelName": MODEL_NAME,
+                "modelName": OLLAMA_LLM_MODEL,
                 "memoryCount": len(memories),
                 "memorySource": memory_source,
                 "edgeNodeId": EDGE_NODE_ID,
@@ -968,7 +945,7 @@ async def generate(req: GenerateRequest, background_tasks: BackgroundTasks):
                 "userId": req.userId,
                 "sessionId": req.sessionId,
                 "edgeNodeId": EDGE_NODE_ID,
-                "model": MODEL_NAME,
+                "model": OLLAMA_LLM_MODEL,
                 "status": "error",
                 "error": str(e),
             },

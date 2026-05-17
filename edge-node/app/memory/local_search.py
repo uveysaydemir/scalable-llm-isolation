@@ -1,8 +1,8 @@
 """
 Local semantic search over a user's cached LTM entries.
 
-Loads all-MiniLM-L6-v2 once (lazily) and keeps it in process memory.
-Embeddings are L2-normalised so dot-product == cosine similarity.
+Embeddings are fetched from Ollama (nomic-embed-text, 768-dim),
+L2-normalised so dot-product == cosine similarity.
 """
 
 from __future__ import annotations
@@ -10,41 +10,38 @@ from __future__ import annotations
 import logging
 from typing import List
 
+import httpx
 import numpy as np
-from sentence_transformers import SentenceTransformer
+
+from app.config import OLLAMA_BASE_URL, OLLAMA_EMBED_MODEL
 
 logger = logging.getLogger(__name__)
 
-_MODEL_NAME = "all-MiniLM-L6-v2"
-_EMBEDDING_DIM = 384
-_model: SentenceTransformer | None = None
+_EMBEDDING_DIM = 768  # nomic-embed-text output dimension
 
 
-def _get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        logger.info("Loading sentence-transformer model %s", _MODEL_NAME)
-        _model = SentenceTransformer(_MODEL_NAME)
-    return _model
-
-
-def embed(texts: List[str]) -> np.ndarray:
-    """Return an (n, 384) float32 array of L2-normalised embeddings.
-
-    Returns an empty (0, 384) array for empty input so callers can always
-    do matrix operations without branching.
-    """
+async def embed(texts: List[str]) -> np.ndarray:
+    """Return an (n, 768) float32 array of L2-normalised embeddings."""
     if not texts:
         return np.empty((0, _EMBEDDING_DIM), dtype=np.float32)
-    return _get_model().encode(
-        texts,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-        show_progress_bar=False,
-    )
+
+    vectors: list[list[float]] = []
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for text in texts:
+            resp = await client.post(
+                f"{OLLAMA_BASE_URL}/api/embeddings",
+                json={"model": OLLAMA_EMBED_MODEL, "prompt": text},
+            )
+            resp.raise_for_status()
+            vectors.append(resp.json()["embedding"])
+
+    arr = np.array(vectors, dtype=np.float32)
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1.0, norms)
+    return arr / norms
 
 
-def search_relevant(
+async def search_relevant(
     query: str,
     memories: List[str],
     embeddings: np.ndarray,
@@ -54,8 +51,8 @@ def search_relevant(
     if not memories or embeddings.shape[0] == 0:
         return []
 
-    query_vec = embed([query])[0]           # (384,)
-    scores = embeddings @ query_vec         # (n,)
+    query_vec = (await embed([query]))[0]   # (768,)
+    scores = embeddings @ query_vec          # (n,)
     k = min(top_k, len(memories))
     top_indices = np.argsort(scores)[::-1][:k]
     return [memories[i] for i in top_indices]

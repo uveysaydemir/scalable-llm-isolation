@@ -948,7 +948,7 @@ function EdgeNode(props: {
                       <span className="userStateExpLabel">LTM cache</span>
                       {state.ltmMemories.length > 0 ? (
                         <div className="userStateExpMems">
-                          {state.ltmMemories.map((mem, i) => (
+                          {state.ltmMemories.filter((mem) => !/:\s*unknown\s*$/i.test(mem)).map((mem, i) => (
                             <div key={i} className="userStateExpMemItem">
                               <p>{mem}</p>
                             </div>
@@ -1213,7 +1213,7 @@ function UserSideSheet(props: {
                     </div>
                     {state.ltmMemories.length > 0 ? (
                       <div className="ssMemList">
-                        {state.ltmMemories.map((mem, i) => (
+                        {state.ltmMemories.filter((mem) => !/:\s*unknown\s*$/i.test(mem)).map((mem, i) => (
                           <div key={`${edge}-ltm-${i}`} className="ssMemItem">
                             <p>{mem}</p>
                           </div>
