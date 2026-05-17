@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -116,9 +117,81 @@ model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
 
+# Serialises all model.generate calls so extraction and inference never overlap.
+_model_lock = asyncio.Lock()
+
 local_session_registry = LocalSessionRegistry(
     ttl_seconds=HANDOVER_FRESHNESS_THRESHOLD_SECONDS
 )
+
+
+def _run_extraction_sync(messages: list) -> list[str]:
+    """Extract key personal facts from session messages using the loaded model.
+    Runs synchronously — call only via run_in_executor."""
+    turns = [
+        f"{m['role'].capitalize()}: {m['content'].strip()}"
+        for m in messages
+        if m.get("content", "").strip()
+    ]
+    if not turns:
+        return []
+
+    conversation = "\n".join(turns)
+    extraction_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Extract key personal facts about the user from the conversation. "
+                "Output one fact per line. Include only concrete facts such as name, "
+                "occupation, location, preferences, relationships, or goals. "
+                "If there are no personal facts, output exactly: none"
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Conversation:\n{conversation}\n\nFacts:",
+        },
+    ]
+
+    if getattr(tokenizer, "chat_template", None):
+        model_input = tokenizer.apply_chat_template(
+            extraction_messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+    else:
+        model_input = (
+            "Extract key personal facts about the user from the conversation below.\n"
+            "Output one fact per line. If none, output: none\n\n"
+            f"Conversation:\n{conversation}\n\nFacts:"
+        )
+
+    inputs = tokenizer(model_input, return_tensors="pt")
+    output_ids = model.generate(
+        **inputs,
+        max_new_tokens=128,
+        do_sample=False,
+        pad_token_id=tokenizer.eos_token_id,
+    )
+    new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
+    raw = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+    if not raw or raw.lower().startswith("none"):
+        return []
+
+    facts = []
+    for line in raw.splitlines():
+        cleaned = re.sub(r"^[\s\-\*\d\.\)]+", "", line).strip()
+        if len(cleaned) > 5:
+            facts.append(cleaned)
+    return facts
+
+
+async def extract_facts_from_session(messages: list) -> list[str]:
+    """Async wrapper: acquires the model lock then runs extraction in a thread."""
+    loop = asyncio.get_running_loop()
+    async with _model_lock:
+        return await loop.run_in_executor(None, _run_extraction_sync, messages)
 
 
 def elapsed_ms(start: float, end: float | None = None) -> float:
@@ -330,20 +403,30 @@ async def persist_memory_background(
 ) -> None:
     log_event("memory_persist_started", {"userId": user_id, "messageCount": len(messages)})
     try:
-        extracted = await memory_client.add_messages(
-            user_id=user_id,
-            messages=[{"role": m["role"], "content": m["content"]} for m in messages],
-        )
+        facts = await extract_facts_from_session(messages)
+        log_event("memory_facts_extracted", {"userId": user_id, "factCount": len(facts), "facts": facts})
+
+        if facts:
+            persist_messages = [{"role": "user", "content": f} for f in facts]
+        else:
+            # Fall back to raw user messages if the model found nothing
+            persist_messages = [
+                {"role": m["role"], "content": m["content"]}
+                for m in messages
+                if m.get("role") == "user"
+            ]
+
+        stored = await memory_client.add_messages(user_id=user_id, messages=persist_messages)
         ltm_cache.invalidate(user_id)
         log_event(
             "memory_persist_completed",
-            {"userId": user_id, "storedMessages": len(messages), "extractedFacts": extracted},
+            {"userId": user_id, "storedMessages": len(messages), "extractedFacts": stored},
         )
         await broadcast_sse_event({
             "type": "persistence_completed",
             "userId": user_id,
             "edgeNodeId": EDGE_NODE_ID,
-            "stored": extracted,
+            "stored": stored,
         })
     except Exception as e:
         log_event("memory_persist_failed", {"userId": user_id, "error": str(e)})
