@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -7,6 +8,7 @@ from typing import List, Optional
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
 
 from app.config import (
@@ -59,6 +61,17 @@ from app.schemas import (
 memory_client = MemoryClient()
 ltm_cache = LTMCache(ttl_seconds=LTM_CACHE_TTL_SECONDS)
 stm_store = STMStore(session_ttl_seconds=STM_TTL_SECONDS)
+
+_sse_queues: list[asyncio.Queue] = []
+
+
+async def broadcast_sse_event(event: dict) -> None:
+    data = json.dumps(event)
+    for q in list(_sse_queues):
+        try:
+            q.put_nowait(data)
+        except asyncio.QueueFull:
+            pass
 
 
 async def _flush_expired_stm_loop() -> None:
@@ -326,12 +339,54 @@ async def persist_memory_background(
             "memory_persist_completed",
             {"userId": user_id, "storedMessages": len(messages), "extractedFacts": extracted},
         )
+        await broadcast_sse_event({
+            "type": "persistence_completed",
+            "userId": user_id,
+            "edgeNodeId": EDGE_NODE_ID,
+            "stored": extracted,
+        })
     except Exception as e:
         log_event("memory_persist_failed", {"userId": user_id, "error": str(e)})
+        await broadcast_sse_event({
+            "type": "persistence_failed",
+            "userId": user_id,
+            "edgeNodeId": EDGE_NODE_ID,
+        })
         raise
 
 
 # Endpoints
+
+
+@app.get("/events")
+async def sse_stream():
+    queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+    _sse_queues.append(queue)
+
+    async def stream():
+        try:
+            yield "data: {\"type\":\"connected\"}\n\n"
+            while True:
+                try:
+                    data = await asyncio.wait_for(queue.get(), timeout=25.0)
+                    yield f"data: {data}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+        finally:
+            try:
+                _sse_queues.remove(queue)
+            except ValueError:
+                pass
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/health")

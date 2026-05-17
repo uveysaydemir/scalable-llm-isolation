@@ -193,9 +193,60 @@ export default function App() {
     left: emptyEdgePanel,
     right: emptyEdgePanel,
   });
+
+  // Detect STM expiry transitions and show an immediate "persisting…" notice.
+  // The final result notice arrives via SSE once embedding completes.
   useEffect(() => {
+    (["left", "right"] as EdgeKey[]).forEach((edge) => {
+      ([1, 2, 3] as UserId[]).forEach((id) => {
+        if (prevEdgePanelRef.current[edge][id].stm && !edgePanel[edge][id].stm) {
+          showTransferNotice({
+            from: edge,
+            to: "global",
+            text: `memory persist user-${id}: ${edgeIdByKey[edge]} → global DB (persisting…)`,
+          });
+        }
+      });
+    });
     prevEdgePanelRef.current = edgePanel;
   }, [edgePanel]);
+
+  // Subscribe to SSE streams from both edge nodes (mount-once).
+  useEffect(() => {
+    const sources = (["left", "right"] as EdgeKey[]).map((edge) => {
+      const source = new EventSource(`/api/${edge}/events`);
+      source.onmessage = (e: MessageEvent) => {
+        try {
+          const data = JSON.parse(e.data as string) as {
+            type?: string;
+            userId?: string;
+            stored?: number;
+          };
+          if (data.type === "persistence_completed" && data.userId) {
+            const stored = data.stored ?? 0;
+            showTransferNotice({
+              from: edge,
+              to: "global",
+              text:
+                stored > 0
+                  ? `memory persist ${data.userId}: ${edgeIdByKey[edge]} → global DB, ${stored} memor${stored === 1 ? "y" : "ies"} stored`
+                  : `memory persist ${data.userId}: no new memories stored`,
+            });
+          } else if (data.type === "persistence_failed" && data.userId) {
+            showTransferNotice({
+              from: edge,
+              to: "global",
+              text: `memory persist ${data.userId}: persistence failed on ${edgeIdByKey[edge]}`,
+            });
+          }
+        } catch {
+          // ignore malformed frames
+        }
+      };
+      return source;
+    });
+    return () => sources.forEach((s) => s.close());
+  }, []);
 
   const selectedUser = useMemo(
     () => users.find((user) => user.selected) ?? users[0],
@@ -280,11 +331,6 @@ export default function App() {
       );
 
       if (!cancelled) {
-        const persistenceNotices = collectPersistenceNotices(
-          prevEdgePanelRef.current,
-          nextPanel,
-        );
-        persistenceNotices.forEach((notice) => showTransferNotice(notice));
         setEdgePanel((current) => mergeEdgePanelPoll(current, nextPanel));
       }
     }
@@ -1449,29 +1495,6 @@ function mergeEdgePanelPoll(
   };
 }
 
-function collectPersistenceNotices(
-  current: Record<EdgeKey, EdgePanelState>,
-  next: Record<EdgeKey, EdgePanelState>,
-): Array<Omit<TransferNotice, "id">> {
-  const notices: Array<Omit<TransferNotice, "id">> = [];
-
-  (["left", "right"] as EdgeKey[]).forEach((edge) => {
-    ([1, 2, 3] as UserId[]).forEach((id) => {
-      const hadStm = current[edge][id].stm;
-      const hasStm = next[edge][id].stm;
-      if (hadStm && !hasStm) {
-        const stmSize = fmtBytes(calcBytes(current[edge][id].stmMessages));
-        notices.push({
-          from: edge,
-          to: "global",
-          text: `memory persist user-${id}: ${edgeIdByKey[edge]} → global memory, STM ${stmSize}`,
-        });
-      }
-    });
-  });
-
-  return notices;
-}
 
 function mergeSingleEdgePanel(
   current: EdgePanelState,
