@@ -3,5 +3,7 @@ dist
 .env
 .DS_Store
 *.log
+*.tsbuildinfo
 *__pycache__/
 evaluation/results/
+*.md

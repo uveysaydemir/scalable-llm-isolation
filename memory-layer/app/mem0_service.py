@@ -69,6 +69,9 @@ class Mem0Service:
             limit=limit,
         )
 
+    def get_all(self, *, user_id: str) -> Dict[str, Any]:
+        return self.memory.get_all(user_id=user_id)
+
     def add_messages(
         self,
         *,

@@ -31,6 +31,11 @@ class MemoryAddRequest(BaseModel):
     assistantMessage: str = Field(..., min_length=1)
 
 
+class RuntimeSettingsRequest(BaseModel):
+    sessionTtlSeconds: int = Field(..., ge=1)
+    ltmCacheTtlSeconds: int = Field(..., ge=1)
+
+
 class HandoverDecisionRequest(BaseModel):
     userId: str = Field(..., min_length=1)
     sessionId: Optional[str] = Field(default=None, min_length=1)

@@ -1,5 +1,6 @@
 from fastapi import HTTPException
 
+from app.memory import local_search
 from app.memory.cache import LTMCache
 from app.memory.stm_store import STMStore
 from app.schemas import HandoverExportRequest, HandoverPackageRequest
@@ -59,7 +60,8 @@ def import_handover_package(
             user_id=package.userId,
         )
 
-    ltm_cache.set(package.userId, package.ltm)
+    embeddings = local_search.embed(package.ltm)
+    ltm_cache.set(package.userId, package.ltm, embeddings)
     local_session_registry.touch(
         user_id=package.userId,
         session_id=package.sessionId,
