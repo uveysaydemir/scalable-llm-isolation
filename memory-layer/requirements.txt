@@ -1,6 +1,5 @@
 fastapi==0.110.0
 uvicorn[standard]==0.29.0
-mem0ai==0.1.88
 qdrant-client
-ollama==0.4.7
+httpx>=0.27.0
 pydantic==2.9.0

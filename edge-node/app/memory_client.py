@@ -41,17 +41,21 @@ class MemoryClient:
         return [item["memory"] for item in results if item.get("memory")]
 
     async def add_messages(self, *, user_id: str, messages: list[dict]) -> int:
-        """Returns the number of facts mem0 extracted and stored."""
-        # Mem0 calls Ollama LLM to extract facts — allow unlimited read time.
-        _timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
-        async with httpx.AsyncClient(timeout=_timeout) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             res = await client.post(
                 f"{MEMORY_LAYER_URL}/memory/add",
-                json={
-                    "userId": user_id,
-                    "messages": messages,
-                },
+                json={"userId": user_id, "messages": messages},
             )
             res.raise_for_status()
-            payload = res.json()
-            return payload.get("extractedFacts", 0)
+            return res.json().get("extractedFacts", 0)
+
+    async def replace_messages(self, *, user_id: str, facts: list[str]) -> int:
+        """Delete all existing LTM for user and replace with the merged fact list.
+        Returns the number of facts stored."""
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            res = await client.post(
+                f"{MEMORY_LAYER_URL}/memory/replace",
+                json={"userId": user_id, "facts": facts},
+            )
+            res.raise_for_status()
+            return res.json().get("replacedWith", 0)

@@ -2,14 +2,14 @@ import logging
 
 from fastapi import FastAPI, HTTPException
 
-from app.mem0_service import Mem0Service
+from app.embedding_service import EmbeddingService
 
 logger = logging.getLogger("memory-layer")
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(title="Memory Layer")
 
-memory_service = Mem0Service()
+memory_service = EmbeddingService()
 
 
 @app.get("/health")
@@ -27,7 +27,7 @@ def search_memory(payload: dict):
         raise HTTPException(status_code=400, detail="userId and query are required")
 
     raw = memory_service.search(user_id=user_id, query=query, limit=limit)
-    results = raw.get("results", []) if isinstance(raw, dict) else []
+    results = raw.get("results", [])
 
     return {
         "ok": True,
@@ -44,7 +44,7 @@ def get_all_memories(userId: str):
         raise HTTPException(status_code=400, detail="userId is required")
 
     raw = memory_service.get_all(user_id=userId)
-    results = raw.get("results", []) if isinstance(raw, dict) else []
+    results = raw.get("results", [])
 
     return {
         "ok": True,
@@ -64,14 +64,46 @@ def add_memory(payload: dict):
 
     try:
         result = memory_service.add_messages(user_id=user_id, messages=messages)
-        extracted = len(result.get("results", [])) if isinstance(result, dict) else 0
-        logger.info("mem0 add completed userId=%s messages=%d extracted=%d", user_id, len(messages), extracted)
+        stored = len(result.get("results", []))
+        logger.info(
+            "embedding add completed userId=%s messages=%d stored=%d",
+            user_id,
+            len(messages),
+            stored,
+        )
         return {
             "ok": True,
             "userId": user_id,
             "storedMessages": len(messages),
-            "extractedFacts": extracted,
+            "extractedFacts": stored,
         }
     except Exception as e:
-        logger.error("mem0 add failed userId=%s error=%s", user_id, e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"mem0 add failed: {e}")
+        logger.error("embedding add failed userId=%s error=%s", user_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"embedding add failed: {e}")
+
+
+@app.post("/memory/replace")
+def replace_memory(payload: dict):
+    user_id = payload.get("userId")
+    facts = payload.get("facts", [])
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="userId is required")
+
+    try:
+        result = memory_service.replace_all(user_id=user_id, facts=facts)
+        stored = len(result.get("results", []))
+        logger.info(
+            "memory replace completed userId=%s facts_in=%d stored=%d",
+            user_id,
+            len(facts),
+            stored,
+        )
+        return {
+            "ok": True,
+            "userId": user_id,
+            "replacedWith": stored,
+        }
+    except Exception as e:
+        logger.error("memory replace failed userId=%s error=%s", user_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"memory replace failed: {e}")
