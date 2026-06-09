@@ -186,6 +186,295 @@ docker compose up --build
 
 ---
 
+## Example Flow
+
+A concrete walkthrough of one user session: cold start on the left edge, a warm multi-turn conversation, and a predictive handover to the right edge before the user physically crosses over.
+
+> **User:** Alice (`user-1`) · **Edge Node 1 (left):** `:8080` · **Edge Node 2 (right):** `:8083`  
+> STM TTL: 40 s · LTM cache TTL: 40 s
+
+---
+
+### Phase 1 — Cold Start
+
+Alice sends her very first message. There is no session, no cached LTM, and nothing yet in Qdrant.
+
+```
+→ POST /generate  (edge-node-left)
+  userId:    user-1
+  sessionId: null
+  prompt:    "Hi! I'm Alice. I'm a frontend developer and I mostly work in TypeScript."
+```
+
+**What happens internally:**
+
+1. No `sessionId` → a fresh session `sess_a1b2` is created in `STMStore`.
+2. LTM lookup: `LTMCache` miss → HTTP call to `memory-layer /memory/all` → Qdrant returns **0 facts** (new user).
+3. Prompt is built with no prior context, just the system prompt.
+4. Ollama (`qwen2.5:7b`) responds:
+
+```
+← assistant:
+   "Nice to meet you, Alice! TypeScript is a great choice for large-scale
+    frontend work — the type safety pays off quickly on complex UIs.
+    What are you building at the moment?"
+```
+
+5. Turn appended to STM: `[{user: "Hi! I'm Alice…"}, {assistant: "Nice to meet you…"}]`
+6. `memorySource: "none"` — no prior facts were available.
+
+**Edge state after Phase 1:**
+
+| | Edge Node 1 | Edge Node 2 |
+|---|---|---|
+| STM | ✅ 1 turn (sess_a1b2) | ❌ |
+| LTM cached | ❌ | ❌ |
+| Qdrant facts | 0 | — |
+
+---
+
+### Phase 2 — Hot Conversation
+
+Alice continues. The session is warm — STM holds the full history and the LTM cache is primed after the first round-trip.
+
+**Turn 2**
+
+```
+→ POST /generate
+  userId:    user-1
+  sessionId: sess_a1b2
+  prompt:    "I'm building a React dashboard. What state management approach
+              would you recommend?"
+```
+
+STM now has 2 previous messages. They are prepended to the Ollama request as history. LTM cache is still empty (no facts persisted yet — session is young), so only conversation context is used.
+
+```
+← assistant:
+   "For a React + TypeScript dashboard, I'd look at Zustand or Redux Toolkit.
+    Redux Toolkit is battle-tested and has great devtools, but Zustand is
+    much lighter — less ceremony, no boilerplate. Which matters more to you:
+    ecosystem size or minimal setup?"
+```
+
+**Turn 3**
+
+```
+→ POST /generate
+  userId:    user-1
+  sessionId: sess_a1b2
+  prompt:    "Minimal boilerplate, definitely. I hate ceremony."
+```
+
+STM: 4 messages. Ollama sees the full conversation thread.
+
+```
+← assistant:
+   "Then Zustand is the clear winner. You get a tiny store with a simple
+    `create()` call, no reducers, no action types. Works beautifully
+    with TypeScript generics too — your slice types flow through
+    automatically."
+```
+
+**Edge state after Phase 2:**
+
+| | Edge Node 1 | Edge Node 2 |
+|---|---|---|
+| STM | ✅ 3 turns (sess_a1b2) | ❌ |
+| LTM cached | ❌ (still pre-flush) | ❌ |
+
+---
+
+### Interlude — STM Expiry & LTM Persistence
+
+40 seconds pass with no new message. `_flush_expired_stm_loop` fires on edge-node-left.
+
+1. STM for `sess_a1b2` is expired and exported.
+2. Memory layer is queried for existing facts → **0 facts** (first flush).
+3. The raw conversation is sent to `qwen2.5:7b` with the extraction prompt:
+
+```
+Existing facts: (none)
+
+Conversation:
+  user:      "Hi! I'm Alice. I'm a frontend developer and I mostly work in TypeScript."
+  assistant: "Nice to meet you, Alice!…"
+  user:      "I'm building a React dashboard…"
+  assistant: "…Zustand or Redux Toolkit…"
+  user:      "Minimal boilerplate, definitely. I hate ceremony."
+  assistant: "Then Zustand is the clear winner…"
+
+Extract a deduplicated fact list in "category: value" format.
+```
+
+4. Model output (merged facts):
+
+```
+name: Alice
+occupation: frontend developer
+preferred_language: TypeScript
+current_project: React dashboard
+state_management: Zustand
+preference: minimal boilerplate, dislikes ceremony
+```
+
+5. All 6 facts are written to Qdrant under `user-1`. STM deleted from memory.
+6. SSE event fired → dashboard shows "memory persist user-1: edge-node-left → global DB, 6 memories stored".
+
+---
+
+### Phase 3 — New Session with Hot LTM
+
+Alice returns after a break and starts a new session.
+
+```
+→ POST /generate
+  userId:    user-1
+  sessionId: null                 ← new session
+  prompt:    "Hey, what state management library did we land on?"
+```
+
+1. New session `sess_c3d4` created.
+2. `LTMCache` miss → `memory-layer /memory/all` returns **6 facts** from Qdrant.
+3. Query `"state management library"` is embedded with `nomic-embed-text` (768-dim).
+4. Cosine similarity ranked against the 6 fact embeddings → top results:
+   - `state_management: Zustand` (0.94)
+   - `preference: minimal boilerplate, dislikes ceremony` (0.81)
+   - `current_project: React dashboard` (0.76)
+5. Facts injected into the system prompt. Ollama responds:
+
+```
+← assistant:
+   "We landed on Zustand — it matched your preference for minimal boilerplate
+    perfectly, and it plays nicely with TypeScript. Are you ready to wire it
+    into the dashboard, or do you have more questions first?"
+```
+
+`memorySource: "memory-layer"` — facts came from the global store, not a prior local cache.
+
+**Edge state after Phase 3:**
+
+| | Edge Node 1 | Edge Node 2 |
+|---|---|---|
+| STM | ✅ 1 turn (sess_c3d4) | ❌ |
+| LTM cached | ✅ 6 facts + embeddings | ❌ |
+
+---
+
+### Phase 4 — Predictive Handover (Pre-transfer)
+
+Alice physically moves toward Edge Node 2. The dashboard sends `clientDirection: right` with her next message.
+
+```
+→ POST /generate
+  userId:          user-1
+  sessionId:       sess_c3d4
+  clientDirection: right
+  clientSpeed:     1
+  prompt:          "Let's wire it up. Where do I start?"
+```
+
+Ollama generates the response normally. **In parallel**, before the response is even finished, the edge node:
+
+1. Detects `clientDirection: right` and velocity above threshold.
+2. Estimates target: `edge-node-right` at `:8083`.
+3. Builds the handover package:
+
+```json
+{
+  "userId":         "user-1",
+  "sessionId":      "sess_c3d4",
+  "sourceEdgeId":   "edge-node-left",
+  "targetEdgeId":   "edge-node-right",
+  "transferReason": "predictive_client_mobility",
+  "clientDirection": "right",
+  "clientSpeed":     1,
+  "stm": {
+    "sessionId": "sess_c3d4",
+    "userId":    "user-1",
+    "messages": [
+      { "role": "user",      "content": "Hey, what state management library did we land on?" },
+      { "role": "assistant", "content": "We landed on Zustand…" },
+      { "role": "user",      "content": "Let's wire it up. Where do I start?" },
+      { "role": "assistant", "content": "…" }
+    ]
+  },
+  "ltm": [
+    "name: Alice",
+    "occupation: frontend developer",
+    "preferred_language: TypeScript",
+    "current_project: React dashboard",
+    "state_management: Zustand",
+    "preference: minimal boilerplate, dislikes ceremony"
+  ]
+}
+```
+
+> Note: `ltm` is **raw strings only** — no embeddings are transferred.
+
+4. Package is `POST`ed to `edge-node-right /handover/package` as a background task.
+5. Edge Node 2 receives it and:
+   - Imports STM into its own `STMStore` (session `sess_c3d4` now live on both nodes).
+   - Calls `local_search.embed(ltm_strings)` → re-generates 6 × 768-dim vectors locally.
+   - Stores facts + embeddings in its own `LTMCache`.
+
+```
+← assistant (from edge-node-left, response to current request):
+   "Start by installing Zustand: `npm install zustand`. Then create a store
+    file — `src/store/dashboardStore.ts`. Define your state shape and expose
+    actions directly on the store object. Want me to sketch out the initial
+    store for your dashboard?"
+```
+
+Dashboard notice: `pretransfer user-1: edge-node-left → edge-node-right, STM 1.1 KB, LTM 0.3 KB`
+
+**Edge state after Phase 4:**
+
+| | Edge Node 1 | Edge Node 2 |
+|---|---|---|
+| STM | ✅ 2 turns (sess_c3d4) | ✅ 2 turns (prefetched) |
+| LTM cached | ✅ 6 facts | ✅ 6 facts (re-embedded) |
+| Cache phase | hot | prefetched |
+
+---
+
+### Phase 5 — Seamless Continuation on Edge Node 2
+
+Alice has physically moved. Her next request is routed to edge-node-right.
+
+```
+→ POST /generate  (edge-node-right)
+  userId:    user-1
+  sessionId: sess_c3d4
+  prompt:    "Yes, please sketch the initial store."
+```
+
+Edge Node 2 already has the full session and all LTM facts — **zero cold-start latency**. The conversation continues without a gap:
+
+```
+← assistant:
+   "Here's a minimal Zustand store for your dashboard:
+
+    import { create } from 'zustand'
+
+    type DashboardState = {
+      selectedUserId: number | null
+      setSelectedUser: (id: number) => void
+    }
+
+    export const useDashboardStore = create<DashboardState>((set) => ({
+      selectedUserId: null,
+      setSelectedUser: (id) => set({ selectedUserId: id }),
+    }))
+
+   TypeScript types flow through without any extra boilerplate — exactly what
+   you were after."
+```
+
+`memorySource: "ltm-cache"` — facts served from the pre-warmed local cache on edge-node-right. No round-trip to Qdrant or the memory layer was needed.
+
+---
+
 ## Demo Dashboard
 
 > The dashboard is a development tool for visualising system behaviour — it is not part of the core architecture.

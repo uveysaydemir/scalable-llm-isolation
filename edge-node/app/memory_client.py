@@ -1,7 +1,11 @@
-from typing import List
+from typing import List, Tuple
+
 import httpx
+import numpy as np
 
 from app.config import MEMORY_LAYER_URL
+
+_EMBEDDING_DIM = 768
 
 
 class MemoryClient:
@@ -28,7 +32,7 @@ class MemoryClient:
 
         return memories
 
-    async def get_all(self, *, user_id: str) -> List[str]:
+    async def get_all(self, *, user_id: str) -> Tuple[List[str], np.ndarray]:
         async with httpx.AsyncClient(timeout=15.0) as client:
             res = await client.get(
                 f"{MEMORY_LAYER_URL}/memory/all",
@@ -37,8 +41,15 @@ class MemoryClient:
             res.raise_for_status()
             payload = res.json()
 
-        results = payload.get("results", [])
-        return [item["memory"] for item in results if item.get("memory")]
+        results = [item for item in payload.get("results", []) if item.get("memory")]
+        if not results:
+            return [], np.empty((0, _EMBEDDING_DIM), dtype=np.float32)
+
+        memories = [item["memory"] for item in results]
+        embeddings = np.array(
+            [item["vector"] for item in results], dtype=np.float32
+        )
+        return memories, embeddings
 
     async def add_messages(self, *, user_id: str, messages: list[dict]) -> int:
         async with httpx.AsyncClient(timeout=30.0) as client:

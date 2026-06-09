@@ -36,12 +36,52 @@ services:
       - .env
     environment:
       EDGE_NODE_ID: edge-node-left
-      EDGE_TOPOLOGY: edge-node-left,edge-node-right
-      EDGE_NEIGHBOR_RIGHT_URL: http://edge-node-right:8080
+      EDGE_TOPOLOGY: edge-node-left,edge-node-2,edge-node-3,edge-node-right
+      EDGE_NEIGHBOR_RIGHT_URL: http://edge-node-2:8080
       MEMORY_LAYER_URL: http://memory-layer:8090
     volumes:
       - ./edge-node/app:/app/app:ro
       - ./edge-node/tests:/app/tests:ro
+    depends_on:
+      memory-layer:
+        condition: service_healthy
+
+  edge-node-2:
+    image: scalable-llm-isolation-edge-node
+    build:
+      context: ./edge-node
+    ports:
+      - "8081:8080"
+    env_file:
+      - .env
+    environment:
+      EDGE_NODE_ID: edge-node-2
+      EDGE_TOPOLOGY: edge-node-left,edge-node-2,edge-node-3,edge-node-right
+      EDGE_NEIGHBOR_LEFT_URL: http://edge-node-left:8080
+      EDGE_NEIGHBOR_RIGHT_URL: http://edge-node-3:8080
+      MEMORY_LAYER_URL: http://memory-layer:8090
+    volumes:
+      - ./edge-node/app:/app/app:ro
+    depends_on:
+      memory-layer:
+        condition: service_healthy
+
+  edge-node-3:
+    image: scalable-llm-isolation-edge-node
+    build:
+      context: ./edge-node
+    ports:
+      - "8082:8080"
+    env_file:
+      - .env
+    environment:
+      EDGE_NODE_ID: edge-node-3
+      EDGE_TOPOLOGY: edge-node-left,edge-node-2,edge-node-3,edge-node-right
+      EDGE_NEIGHBOR_LEFT_URL: http://edge-node-2:8080
+      EDGE_NEIGHBOR_RIGHT_URL: http://edge-node-right:8080
+      MEMORY_LAYER_URL: http://memory-layer:8090
+    volumes:
+      - ./edge-node/app:/app/app:ro
     depends_on:
       memory-layer:
         condition: service_healthy
@@ -56,8 +96,8 @@ services:
       - .env
     environment:
       EDGE_NODE_ID: edge-node-right
-      EDGE_TOPOLOGY: edge-node-left,edge-node-right
-      EDGE_NEIGHBOR_LEFT_URL: http://edge-node-left:8080
+      EDGE_TOPOLOGY: edge-node-left,edge-node-2,edge-node-3,edge-node-right
+      EDGE_NEIGHBOR_LEFT_URL: http://edge-node-3:8080
       MEMORY_LAYER_URL: http://memory-layer:8090
     volumes:
       - ./edge-node/app:/app/app:ro

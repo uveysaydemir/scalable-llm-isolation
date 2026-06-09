@@ -378,8 +378,7 @@ async def retrieve_memories(user_id: str, query: str, limit: int) -> tuple[List[
         all_memories, embeddings = full
         source = "cache"
     else:
-        all_memories = await memory_client.get_all(user_id=user_id)
-        embeddings = await local_search.embed(all_memories)
+        all_memories, embeddings = await memory_client.get_all(user_id=user_id)
         ltm_cache.set(user_id, all_memories, embeddings)
         source = "memory-layer"
 
@@ -394,7 +393,7 @@ async def persist_memory_background(
     log_event("memory_persist_started", {"userId": user_id, "messageCount": len(messages)})
     try:
         # Load existing LTM so the model can merge/update stale facts
-        existing_facts = await memory_client.get_all(user_id=user_id)
+        existing_facts, _ = await memory_client.get_all(user_id=user_id)
         log_event("memory_ltm_loaded", {"userId": user_id, "existingFactCount": len(existing_facts)})
 
         merged_facts = await extract_merged_facts(messages, existing_facts)

@@ -1,4 +1,11 @@
-import { CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  CSSProperties,
+  FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   ChevronDown,
   ChevronLeft,
@@ -180,14 +187,15 @@ export default function App() {
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [settingsSaving, setSettingsSaving] = useState(false);
   const [settingsForm, setSettingsForm] = useState({
-    sessionTtlSeconds: 120,
-    ltmCacheTtlSeconds: 300,
+    cacheTtlSeconds: 120,
   });
-  const [chatHistory, setChatHistory] = useState<Record<UserId, ChatMessage[]>>({
-    1: [],
-    2: [],
-    3: [],
-  });
+  const [chatHistory, setChatHistory] = useState<Record<UserId, ChatMessage[]>>(
+    {
+      1: [],
+      2: [],
+      3: [],
+    },
+  );
 
   const prevEdgePanelRef = useRef<Record<EdgeKey, EdgePanelState>>({
     left: emptyEdgePanel,
@@ -199,7 +207,10 @@ export default function App() {
   useEffect(() => {
     (["left", "right"] as EdgeKey[]).forEach((edge) => {
       ([1, 2, 3] as UserId[]).forEach((id) => {
-        if (prevEdgePanelRef.current[edge][id].stm && !edgePanel[edge][id].stm) {
+        if (
+          prevEdgePanelRef.current[edge][id].stm &&
+          !edgePanel[edge][id].stm
+        ) {
           showTransferNotice({
             from: edge,
             to: "global",
@@ -436,7 +447,8 @@ export default function App() {
         },
       }));
       const stmMsgs = exported.package.stm?.messages ?? [];
-      const stmPkgSize = stmMsgs.length > 0 ? fmtBytes(calcBytes(stmMsgs)) : "0 B";
+      const stmPkgSize =
+        stmMsgs.length > 0 ? fmtBytes(calcBytes(stmMsgs)) : "0 B";
       const ltmPkgSize = fmtBytes(calcBytes(exported.package.ltm));
       showTransferNotice({
         from: source,
@@ -515,19 +527,14 @@ export default function App() {
     try {
       const settings = await fetchRuntimeSettings("left");
       setSettingsForm({
-        sessionTtlSeconds: settings.sessionTtlSeconds,
-        ltmCacheTtlSeconds: settings.ltmCacheTtlSeconds,
+        cacheTtlSeconds: settings.sessionTtlSeconds,
       });
     } catch {
       setSettingsForm({
-        sessionTtlSeconds:
+        cacheTtlSeconds:
           health.left?.localSessionRegistry?.ttlSeconds ??
           health.right?.localSessionRegistry?.ttlSeconds ??
           120,
-        ltmCacheTtlSeconds:
-          health.left?.ltmCache?.ttlSeconds ??
-          health.right?.ltmCache?.ttlSeconds ??
-          300,
       });
     }
   }
@@ -535,9 +542,10 @@ export default function App() {
   async function saveSettings(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
+    const ttl = Math.max(1, Math.floor(settingsForm.cacheTtlSeconds));
     const nextSettings = {
-      sessionTtlSeconds: Math.max(1, Math.floor(settingsForm.sessionTtlSeconds)),
-      ltmCacheTtlSeconds: Math.max(1, Math.floor(settingsForm.ltmCacheTtlSeconds)),
+      sessionTtlSeconds: ttl,
+      ltmCacheTtlSeconds: ttl,
     };
 
     setSettingsSaving(true);
@@ -547,11 +555,9 @@ export default function App() {
           updateRuntimeSettings(edge, nextSettings),
         ),
       );
-      setSettingsForm(nextSettings);
+      setSettingsForm({ cacheTtlSeconds: ttl });
       setSettingsDialogOpen(false);
-      toast.success(
-        `TTL settings applied: session ${nextSettings.sessionTtlSeconds}s, LTM ${nextSettings.ltmCacheTtlSeconds}s`,
-      );
+      toast.success(`Cache TTL applied: ${ttl}s`);
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       toast.error(`Settings update failed: ${detail}`);
@@ -594,7 +600,13 @@ export default function App() {
         maxNewTokens: 32,
       });
 
-      updateUserAfterResponse(selectedUser.id, edge, cachePhase, response, trimmed);
+      updateUserAfterResponse(
+        selectedUser.id,
+        edge,
+        cachePhase,
+        response,
+        trimmed,
+      );
       showMemoryFetchNotice(selectedUser.id, edge, response);
       showTransferNoticeFromResponse(selectedUser.id, edge, response);
       const ts = new Date().toISOString();
@@ -664,7 +676,9 @@ export default function App() {
         const stmSize = recovery.stmImported
           ? fmtBytes(calcBytes(edgePanel[requestEdge][id].stmMessages))
           : "0 B";
-        const ltmSize = fmtBytes(calcBytes(edgePanel[requestEdge][id].ltmMemories));
+        const ltmSize = fmtBytes(
+          calcBytes(edgePanel[requestEdge][id].ltmMemories),
+        );
         showTransferNotice({
           from: source,
           to: requestEdge,
@@ -850,7 +864,7 @@ function EdgeNode(props: {
   return (
     <section className={`edgeNode ${props.edge}`}>
       <div className="edgeHeader">
-        <span>{props.label}</span>
+        <span>Edge Node {props.label}</span>
         <img src={edgeServerAsset} alt="" />
       </div>
       <div className="edgeStatePanel">
@@ -860,7 +874,7 @@ function EdgeNode(props: {
           </span>
           <span>{props.health?.edgeNodeId ?? edgeIdByKey[props.edge]}</span>
         </div>
-        <div className="edgeMetrics">
+        {/* <div className="edgeMetrics">
           <Metric
             label="active sessions"
             value={props.health?.stm?.activeSessions ?? 0}
@@ -869,11 +883,15 @@ function EdgeNode(props: {
             label="ltm cache"
             value={props.health?.ltmCache?.entryCount ?? 0}
           />
-        </div>
+        </div> */}
         <div className="userStateList">
           {props.users.map((user) => {
             const state = props.panel[user.id];
-            const stmActive = isTimerActive(state.stm, state.stmExpiresAt, props.nowMs);
+            const stmActive = isTimerActive(
+              state.stm,
+              state.stmExpiresAt,
+              props.nowMs,
+            );
             const ltmActive = isTimerActive(
               state.ltmCached,
               state.ltmExpiresAt,
@@ -908,17 +926,10 @@ function EdgeNode(props: {
                   </div>
                   <span>{visibleCachePhase}</span>
                   <TimerCell
-                    label="STM"
-                    active={stmActive}
-                    expiresAt={state.stmExpiresAt}
+                    label="cache"
+                    active={stmActive || ltmActive}
+                    expiresAt={stmActive ? state.stmExpiresAt : state.ltmExpiresAt}
                     ttlSeconds={props.health?.localSessionRegistry?.ttlSeconds}
-                    nowMs={props.nowMs}
-                  />
-                  <TimerCell
-                    label="LTM"
-                    active={ltmActive}
-                    expiresAt={state.ltmExpiresAt}
-                    ttlSeconds={props.health?.ltmCache?.ttlSeconds}
                     nowMs={props.nowMs}
                   />
                 </div>
@@ -934,13 +945,17 @@ function EdgeNode(props: {
                               key={i}
                               className={`userStateExpMsg userStateExpMsg--${msg.role}`}
                             >
-                              <span className="userStateExpRole">{msg.role}</span>
+                              <span className="userStateExpRole">
+                                {msg.role}
+                              </span>
                               <p>{msg.content}</p>
                             </div>
                           ))}
                         </div>
                       ) : (
-                        <p className="userStateExpEmpty">No session on this edge.</p>
+                        <p className="userStateExpEmpty">
+                          No session on this edge.
+                        </p>
                       )}
                     </div>
 
@@ -948,14 +963,18 @@ function EdgeNode(props: {
                       <span className="userStateExpLabel">LTM cache</span>
                       {state.ltmMemories.length > 0 ? (
                         <div className="userStateExpMems">
-                          {state.ltmMemories.filter((mem) => !/:\s*unknown\s*$/i.test(mem)).map((mem, i) => (
-                            <div key={i} className="userStateExpMemItem">
-                              <p>{mem}</p>
-                            </div>
-                          ))}
+                          {state.ltmMemories
+                            .filter((mem) => !/:\s*unknown\s*$/i.test(mem))
+                            .map((mem, i) => (
+                              <div key={i} className="userStateExpMemItem">
+                                <p>{mem}</p>
+                              </div>
+                            ))}
                         </div>
                       ) : (
-                        <p className="userStateExpEmpty">No LTM cache on this edge.</p>
+                        <p className="userStateExpEmpty">
+                          No LTM cache on this edge.
+                        </p>
                       )}
                     </div>
                   </div>
@@ -1017,9 +1036,7 @@ function TimerCell(props: {
           {remainingSeconds}
         </span>
       </span>
-      {props.size != null && (
-        <span className="timerSize">{props.size}</span>
-      )}
+      {props.size != null && <span className="timerSize">{props.size}</span>}
     </span>
   );
 }
@@ -1149,7 +1166,9 @@ function UserSideSheet(props: {
           <div className="sideSheetSection sideSheetLocalHistory">
             <div className="sideSheetSectionHead">
               <span>Chat history</span>
-              <span className="ssSubtitle">local · {Math.floor(props.chatHistory.length / 2)} turns</span>
+              <span className="ssSubtitle">
+                local · {Math.floor(props.chatHistory.length / 2)} turns
+              </span>
             </div>
             {props.chatHistory.length === 0 ? (
               <p className="ssEmpty">No messages yet.</p>
@@ -1159,7 +1178,9 @@ function UserSideSheet(props: {
                   <div key={i} className={`ssChatMsg ssChatMsg--${msg.role}`}>
                     <div className="ssChatMsgMeta">
                       <span className="ssChatRole">{msg.role}</span>
-                      <span className="ssChatEdge">{edgeIdByKey[msg.edge]}</span>
+                      <span className="ssChatEdge">
+                        {edgeIdByKey[msg.edge]}
+                      </span>
                       <span className="ssChatTime">
                         {new Date(msg.timestamp).toLocaleTimeString()}
                       </span>
@@ -1174,8 +1195,14 @@ function UserSideSheet(props: {
           <div className="sideSheetEdgeGrid">
             {(["left", "right"] as EdgeKey[]).map((edge) => {
               const state = edges[edge];
-              const stmSize = state.stmMessages.length > 0 ? fmtBytes(calcBytes(state.stmMessages)) : null;
-              const ltmSize = state.ltmMemories.length > 0 ? fmtBytes(calcBytes(state.ltmMemories)) : null;
+              const stmSize =
+                state.stmMessages.length > 0
+                  ? fmtBytes(calcBytes(state.stmMessages))
+                  : null;
+              const ltmSize =
+                state.ltmMemories.length > 0
+                  ? fmtBytes(calcBytes(state.ltmMemories))
+                  : null;
               return (
                 <div className="sideSheetEdgeCol" key={edge}>
                   <h3 className="sideSheetEdgeTitle">{edgeIdByKey[edge]}</h3>
@@ -1213,11 +1240,13 @@ function UserSideSheet(props: {
                     </div>
                     {state.ltmMemories.length > 0 ? (
                       <div className="ssMemList">
-                        {state.ltmMemories.filter((mem) => !/:\s*unknown\s*$/i.test(mem)).map((mem, i) => (
-                          <div key={`${edge}-ltm-${i}`} className="ssMemItem">
-                            <p>{mem}</p>
-                          </div>
-                        ))}
+                        {state.ltmMemories
+                          .filter((mem) => !/:\s*unknown\s*$/i.test(mem))
+                          .map((mem, i) => (
+                            <div key={`${edge}-ltm-${i}`} className="ssMemItem">
+                              <p>{mem}</p>
+                            </div>
+                          ))}
                       </div>
                     ) : (
                       <p className="ssEmpty">No LTM cache on this edge.</p>
@@ -1267,12 +1296,9 @@ function UserSideSheet(props: {
 }
 
 function SettingsDialog(props: {
-  values: { sessionTtlSeconds: number; ltmCacheTtlSeconds: number };
+  values: { cacheTtlSeconds: number };
   saving: boolean;
-  onChange: (values: {
-    sessionTtlSeconds: number;
-    ltmCacheTtlSeconds: number;
-  }) => void;
+  onChange: (values: { cacheTtlSeconds: number }) => void;
   onClose: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -1301,33 +1327,14 @@ function SettingsDialog(props: {
         </div>
 
         <label className="settingsField">
-          <span>Session / STM TTL seconds</span>
+          <span>Cache TTL (seconds)</span>
           <input
             type="number"
             min={1}
             step={1}
-            value={props.values.sessionTtlSeconds}
+            value={props.values.cacheTtlSeconds}
             onChange={(event) =>
-              props.onChange({
-                ...props.values,
-                sessionTtlSeconds: Number(event.target.value),
-              })
-            }
-          />
-        </label>
-
-        <label className="settingsField">
-          <span>LTM cache TTL seconds</span>
-          <input
-            type="number"
-            min={1}
-            step={1}
-            value={props.values.ltmCacheTtlSeconds}
-            onChange={(event) =>
-              props.onChange({
-                ...props.values,
-                ltmCacheTtlSeconds: Number(event.target.value),
-              })
+              props.onChange({ cacheTtlSeconds: Number(event.target.value) })
             }
           />
         </label>
@@ -1335,11 +1342,7 @@ function SettingsDialog(props: {
         <button
           className="settingsSubmit"
           type="submit"
-          disabled={
-            props.saving ||
-            props.values.sessionTtlSeconds < 1 ||
-            props.values.ltmCacheTtlSeconds < 1
-          }
+          disabled={props.saving || props.values.cacheTtlSeconds < 1}
         >
           {props.saving ? "Applying..." : "Apply globally"}
         </button>
@@ -1351,7 +1354,7 @@ function SettingsDialog(props: {
 function GlobalMemory() {
   return (
     <section className="globalMemory" aria-label="Global memory database">
-      <img src={dbAsset} style={{ width: "6rem" }} />
+      <img src={dbAsset} style={{ width: "9rem" }} />
       <span>Global DB</span>
     </section>
   );
@@ -1494,7 +1497,6 @@ function mergeEdgePanelPoll(
     right: mergeSingleEdgePanel(current.right, next.right),
   };
 }
-
 
 function mergeSingleEdgePanel(
   current: EdgePanelState,

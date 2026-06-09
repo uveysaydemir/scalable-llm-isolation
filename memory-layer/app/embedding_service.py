@@ -3,6 +3,7 @@ import uuid
 from typing import Any, Dict, List
 
 import httpx
+import numpy as np
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
     Distance,
@@ -45,7 +46,11 @@ class EmbeddingService:
             timeout=30.0,
         )
         resp.raise_for_status()
-        return resp.json()["embedding"]
+        raw = np.array(resp.json()["embedding"], dtype=np.float32)
+        norm = np.linalg.norm(raw)
+        if norm > 0:
+            raw = raw / norm
+        return raw.tolist()
 
     def _user_filter(self, user_id: str) -> Filter:
         return Filter(
@@ -111,11 +116,13 @@ class EmbeddingService:
             scroll_filter=self._user_filter(user_id),
             limit=200,
             with_payload=True,
+            with_vectors=True,
         )
         return {
             "results": [
                 {
                     "memory": r.payload.get("memory", ""),
+                    "vector": r.vector,
                     "id": str(r.id),
                     "updated_at": r.payload.get("updated_at"),
                 }
